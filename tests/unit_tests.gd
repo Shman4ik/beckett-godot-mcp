@@ -2214,11 +2214,10 @@ func _t_ci_matrix() -> bool:
 	# doctor site owns, free to drift.
 	var probes := RegEx.create_from_string("-ExpectedTools \\d+").search_all(yml).size()
 	_ok(probes == 2, "exactly two probe counts, one per edition (got %d)" % probes)
-	# The edition under test comes from the repository, not the checkout. Keyed on the
-	# sentinel module, a Full tree staged into the public repo would be probed as Full
-	# and pass; keyed on visibility it is held to the Lite count and fails.
-	_ok(yml.contains("github.event.repository.private"),
-			"the probe edition is keyed on repository visibility, not on files on disk")
+	# Fork: the edition under test comes from the checkout, from the same sentinel module the
+	# server reads (this fork ships its own Full layer); each edition keeps its exact count.
+	_ok(yml.contains("Test-Path -LiteralPath 'addons/beckett/tools/runtime_tools.gd'") and not yml.contains("github.event.repository.private"),
+			"the probe edition is keyed on the sentinel module, as the server's own edition is")
 	# A runtime error aborts the test group it happens in and nothing else. The suite fails such a group
 	# itself (_g), and the unit step is a second net for an error in code a group merely calls.
 	var unit_at := yml.find("- name: Unit suite")
@@ -9515,6 +9514,24 @@ func _t_break_flag_compose() -> bool:
 	_ok(bad.is_empty(), "%d spellings of the person's arguments come out as designed%s" % [cases.size(), "" if bad.is_empty() else ": " + " | ".join(bad)])
 	_ok(idem, "adding the flag twice changes nothing the second time")
 	_ok(RunTools.with_ignore_flag("--foo \"bar") == "" and RunTools.with_ignore_flag("%command% --a 'b") == "" and RunTools.with_ignore_flag("x \\\"y") != "", "arguments that end inside a quote cannot take a flag (it would be swallowed): refused; an escaped quote is not an open one")
+	# fork: play_scene args — the game's own user args go after a "--" at the end
+	var ua_cases := [
+		["", ["--seed=3"], "-- --seed=3"],
+		["--headless", ["--seed=3", "--fast"], "--headless -- --seed=3 --fast"],
+		["--headless --ignore-error-breaks", ["--fast"], "--headless --ignore-error-breaks -- --fast"],
+		["--x -- --lang=en", ["--seed=3"], "--x -- --lang=en --seed=3"],
+		["--x ++ --lang=en ", ["--seed=3"], "--x ++ --lang=en --seed=3"],
+		["prime-run %command% --x", ["--site=woods"], "prime-run %command% --x -- --site=woods"],
+		["", ["--name=two words"], "-- \"--name=two words\""],
+		["--headless", [], "--headless"],
+	]
+	var ua_bad: Array = []
+	for c in ua_cases:
+		var got: String = RunTools.with_user_args(str(c[0]), c[1])
+		if got != str(c[2]):
+			ua_bad.append("%s + %s -> %s (want %s)" % [c[0], str(c[1]), got, c[2]])
+	_ok(ua_bad.is_empty(), "%d spellings of game user args land after a \"--\"%s" % [ua_cases.size(), "" if ua_bad.is_empty() else ": " + " | ".join(ua_bad)])
+	_ok(RunTools.with_user_args("--foo \"bar", ["--seed=3"]) == "", "game args after an open quote are refused (they would be swallowed)")
 
 	var words: Array = (RunTools._split_run_args("a  b \"c d\" 'e f' g\\\"h i")["words"] as Array).map(func(w): return str(w["text"]))
 	_ok(words == ["a", "b", "\"c d\"", "'e f'", "g\\\"h", "i"], "the split follows Godot's own: spaces outside quotes, a backslash-escaped quote opens nothing (%s)" % str(words))

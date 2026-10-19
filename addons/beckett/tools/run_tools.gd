@@ -76,7 +76,7 @@ func _register(registry) -> void:
 	registry.register({
 		"name": "play_scene",
 		"description": "Play a scene in the editor. 'scene' (res://) plays a specific scene; current=true plays the open scene; otherwise the project's main scene. Then wait_until condition=play_started, and logs_read for errors. on_ready queues runtime property writes applied the moment the new game connects — the restart boundary batch_execute cannot cross. quiet=true plays muted and off-screen so the person keeps working. Script errors do not pause the game (4.5+): game_logs has them. on_ready shape, retries, what quiet does per run mode: help(tool=\"play_scene\").",
-		"help": "on_ready = [{path|class|name, property, value}, ...]: runtime writes queued now and applied automatically the moment the NEW game connects.\n\nWhy it exists: a restart is the one boundary batch_execute cannot cross. Without on_ready you re-issue the same camera pose, debug flags and spawn state by hand after every single play. With it, that is part of the play call.\n\nwait_until condition=game_connected then reports whether each write landed.\n\nA write whose target is still spawning is RETRIED for a few seconds and, if it never appears, reported as a failure, never silently dropped. So an on_ready that did not take shows up as a failure you can read, not as a game that quietly came up wrong.\n\nquiet = true (1.16) is for playing while the person keeps working on the same machine: the game is MUTED (the master bus, kept muted: a game that restores its saved volume in _ready is muted again within half a second), and its window is moved OFF every screen and flagged no-focus, so it neither covers their work nor takes their keystrokes. It is not minimized: a minimized window stops drawing, and screenshot (and, in Full, the playtest tool) reads the frames the game keeps drawing. What applies depends on how the editor runs the game:\n  separate window (a headless editor, or Game Embed Mode off): muted, parked off-screen, no focus. The game does this itself as its first act, so for the first moment of the launch the window is where the OS put it (a position given on the command line is clamped by the engine to keep a strip on screen: only the game moving itself takes it fully off).\n  embedded Game view (the default since 4.4): on every embedded play the engine either switches the editor to its Game tab or opens a floating Game window (a fresh project does the second), and offers no per-play setting against either. So quiet plays in its own window instead: for the one play call the editor makes the Game workspace see embedding as unavailable (the in-memory project setting display/window/size/mode, put back in the same call; the game reads project.godot, not that memory), and the reply says whether the editor view stayed as it was. If that cannot be done on an engine the game stays embedded, only the mute applies, and the reply says so.\n  headless game: there is no window, only the mute.\nwait_until condition=game_connected and get_play_state report what the GAME says is in force: muted, window position and flags, on screen or not, still drawing. quiet=false forces a normal play when the editor's environment carries BECKETT_QUIET. The person's own F5 afterwards is never quiet.\n\nError breaks (1.16): a script error in a game the editor launched normally PAUSES the game in the editor's debugger, and a paused game cannot answer the runtime channel until someone presses Continue. On Godot 4.5+ play_scene therefore launches with --ignore-error-breaks, the flag behind the Debugger panel's Ignore Error Breaks toggle: the error is still logged (game_logs returns it with its backtrace) and the game keeps running. Breakpoints still stop it, and the person's own F5 is untouched (the flag rides only on this one launch; nothing is saved to project.godot). Opt out with the project setting beckett/ignore_error_breaks=false or the environment variable BECKETT_IGNORE_ERROR_BREAKS=0 (=1 forces it on over a setting of false). Godot 4.4 and older have no such flag, and a game the person starts with F5 pauses on every version: get_play_state then shows debugger_break=true, and every runtime tool and wait_until condition=game_connected answer at once that the game is paused in the debugger, with the next step (Continue in the Debugger panel, or stop_scene and play_scene again).",
+		"help": "on_ready = [{path|class|name, property, value}, ...]: runtime writes queued now and applied automatically the moment the NEW game connects.\n\nWhy it exists: a restart is the one boundary batch_execute cannot cross. Without on_ready you re-issue the same camera pose, debug flags and spawn state by hand after every single play. With it, that is part of the play call.\n\nwait_until condition=game_connected then reports whether each write landed.\n\nA write whose target is still spawning is RETRIED for a few seconds and, if it never appears, reported as a failure, never silently dropped. So an on_ready that did not take shows up as a failure you can read, not as a game that quietly came up wrong.\n\nquiet = true (1.16) is for playing while the person keeps working on the same machine: the game is MUTED (the master bus, kept muted: a game that restores its saved volume in _ready is muted again within half a second), and its window is moved OFF every screen and flagged no-focus, so it neither covers their work nor takes their keystrokes. It is not minimized: a minimized window stops drawing, and screenshot (and, in Full, the playtest tool) reads the frames the game keeps drawing. What applies depends on how the editor runs the game:\n  separate window (a headless editor, or Game Embed Mode off): muted, parked off-screen, no focus. The game does this itself as its first act, so for the first moment of the launch the window is where the OS put it (a position given on the command line is clamped by the engine to keep a strip on screen: only the game moving itself takes it fully off).\n  embedded Game view (the default since 4.4): on every embedded play the engine either switches the editor to its Game tab or opens a floating Game window (a fresh project does the second), and offers no per-play setting against either. So quiet plays in its own window instead: for the one play call the editor makes the Game workspace see embedding as unavailable (the in-memory project setting display/window/size/mode, put back in the same call; the game reads project.godot, not that memory), and the reply says whether the editor view stayed as it was. If that cannot be done on an engine the game stays embedded, only the mute applies, and the reply says so.\n  headless game: there is no window, only the mute.\nwait_until condition=game_connected and get_play_state report what the GAME says is in force: muted, window position and flags, on screen or not, still drawing. quiet=false forces a normal play when the editor's environment carries BECKETT_QUIET. The person's own F5 afterwards is never quiet.\n\nError breaks (1.16): a script error in a game the editor launched normally PAUSES the game in the editor's debugger, and a paused game cannot answer the runtime channel until someone presses Continue. On Godot 4.5+ play_scene therefore launches with --ignore-error-breaks, the flag behind the Debugger panel's Ignore Error Breaks toggle: the error is still logged (game_logs returns it with its backtrace) and the game keeps running. Breakpoints still stop it, and the person's own F5 is untouched (the flag rides only on this one launch; nothing is saved to project.godot). Opt out with the project setting beckett/ignore_error_breaks=false or the environment variable BECKETT_IGNORE_ERROR_BREAKS=0 (=1 forces it on over a setting of false).\n\nargs (fork) = [\"--seed=3\", \"--fast\", \"--foes=hound\"]: the GAME's own user arguments for this one launch, what OS.get_cmdline_user_args() returns. They go after a \"--\" at the end of the editor's Main Run Args, the same one-launch way as the error-break flag: nothing is saved, and the person's own F5 afterwards runs without them. A word with a space is quoted for you. They are refused when the Main Run Args end inside an open quote, or when something pins the setting (override.cfg). Godot 4.4 and older have no such flag, and a game the person starts with F5 pauses on every version: get_play_state then shows debugger_break=true, and every runtime tool and wait_until condition=game_connected answer at once that the game is paused in the debugger, with the next step (Continue in the Debugger panel, or stop_scene and play_scene again).",
 		# Bootstrap set (tool_registry.gd): the run half of the run-and-see loop. L3, so it only
 		# rides when the dial is at Run or above.
 		"always_load": true,
@@ -85,6 +85,7 @@ func _register(registry) -> void:
 			"current": {"type": "boolean"},
 			"on_ready": {"type": "array", "description": "property writes applied once the game connects (shape in help)"},
 			"quiet": {"type": "boolean", "description": "mute the game and park its window off-screen without focus, so the person keeps working"},
+			"args": {"type": "array", "description": "the game's own user args for this launch, e.g. [\"--seed=3\", \"--fast\"] (after --)"},
 		}},
 		"handler": Callable(self, "_play_scene"),
 	})
@@ -141,7 +142,21 @@ func _play_scene(args: Dictionary) -> Dictionary:
 		return {"error": queued}
 	# The flag goes on first and comes off last: arming it emits settings_changed (see IGNORE_BREAKS_FLAG), and that must
 	# not happen while quiet's embed gate has the window mode overridden, which only has to hold for the play call itself.
+	var user_args: Array = []
+	if args.has("args") and args.get("args") != null:
+		if not (args.get("args") is Array):
+			return {"error": "args must be an array of strings, e.g. [\"--seed=3\", \"--fast\"]"}
+		for a in (args.get("args") as Array):
+			var word := str(a)
+			if word.is_empty() or word.contains("\n") or word.contains("\r"):
+				return {"error": "args entries must be non-empty one-line strings (got %s)" % JSON.stringify(a)}
+			user_args.append(word)
 	var breaks := _breaks_arm()
+	var args_refused := _user_args_arm(user_args)
+	if not args_refused.is_empty():
+		_refused_launch_restore()
+		server.bridge.queue_on_ready([])
+		return {"error": args_refused}
 	var quiet_given: bool = args.has("quiet") and args.get("quiet") != null
 	if quiet_given:
 		_quiet_arm(CallArgs.flag(args, "quiet"))
@@ -164,6 +179,8 @@ func _play_scene(args: Dictionary) -> Dictionary:
 	_breaks_disarm()  # the launch has read the arguments: nothing else may see the flag on them
 	if breaks:
 		what += "; " + BREAKS_NOTE
+	if not user_args.is_empty():
+		what += "; game args: %s" % " ".join(PackedStringArray(user_args))
 	if int(queued) > 0:
 		what += "; %d on_ready write(s) queued — they apply when the game connects, and wait_until condition=game_connected reports the result" % int(queued)
 	return PathGuard.noted({"text": what}, guard)
@@ -419,6 +436,63 @@ func _breaks_arm(version_hex: int = -1) -> bool:
 	ProjectSettings.emit_signal("settings_changed")  # by hand: the dialog's copy of the setting only follows this signal
 	_breaks_net_arm(_args_gen)
 	return true
+
+
+## The game's own user args (fork): appended at the very end of the Main Run Args, after a "--" (one is added when
+## the text has neither "--" nor "++"), each word quoted when it holds a space or a quote. "" when they cannot be
+## added: the text ends inside a quote, which would swallow them. Pure, like with_ignore_flag.
+static func with_user_args(args: String, user_args: Array) -> String:
+	if user_args.is_empty():
+		return args
+	var split := _split_run_args(args)
+	if bool(split["open"]):
+		return ""
+	var has_sep := false
+	for word in (split["words"] as Array):
+		if str(word["text"]) in ["--", "++"]:
+			has_sep = true
+			break
+	var quoted: Array = []
+	for a in user_args:
+		var w := str(a)
+		if w.contains(" ") or w.contains("\"") or w.contains("'"):
+			w = "\"" + w.replace("\"", "\\\"") + "\""
+		quoted.append(w)
+	var head := args.rstrip(" ")
+	var tail := " ".join(PackedStringArray(quoted))
+	if not has_sep:
+		tail = "-- " + tail
+	return tail if head.strip_edges().is_empty() else head + " " + tail
+
+
+## Layer the game's user args onto the Main Run Args for the one play call that follows, on top of whatever
+## _breaks_arm put there. "" when armed (or nothing to do), else why not. The text to put back is the person's own:
+## _breaks_arm saved it when it armed, else it is saved here, and _breaks_disarm (and its timer net) restore it.
+func _user_args_arm(user_args: Array) -> String:
+	if user_args.is_empty():
+		return ""
+	if not ProjectSettings.has_setting(RUN_ARGS_SETTING) or not ProjectSettings.has_signal("settings_changed"):
+		return "this editor has no %s setting, so play_scene cannot pass game args" % RUN_ARGS_SETTING
+	var cur := str(ProjectSettings.get_setting(RUN_ARGS_SETTING, ""))
+	var composed := with_user_args(cur, user_args)
+	if composed.is_empty():
+		return "cannot add game args: the editor's Main Run Args end inside an open quote (%s)" % cur
+	ProjectSettings.set_setting(RUN_ARGS_SETTING, composed)
+	if str(ProjectSettings.get_setting(RUN_ARGS_SETTING, "")) != composed:
+		ProjectSettings.set_setting(RUN_ARGS_SETTING, cur)
+		return "cannot add game args: something pins %s (override.cfg?)" % RUN_ARGS_SETTING
+	if _args_saved == null:
+		_args_saved = [cur]
+		_args_gen += 1
+		_breaks_net_arm(_args_gen)
+	ProjectSettings.emit_signal("settings_changed")  # by hand, as in _breaks_arm: the dialog's copy follows only this signal
+	return ""
+
+
+## A launch refused before any play call (its game args could not be armed): put back what _breaks_arm armed. Its own
+## name, so the unit suite's read of _play_scene still finds the one _breaks_disarm call after the last play call.
+func _refused_launch_restore() -> void:
+	_breaks_disarm()
 
 
 ## Put the Main Run Args back as they were, and let the dialog's copy follow (a no-op when nothing is armed).

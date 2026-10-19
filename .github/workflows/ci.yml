@@ -298,17 +298,15 @@ jobs:
       # The edition comes from the checkout: the server itself turns Full when the sentinel
       # module tools/runtime_tools.gd is on disk (core/mcp_server.gd SENTINEL_FULL_MODULE),
       # so the probe asks the same file. Each edition is still held to an exact tool count:
-      # Lite is upstream's 56, Full is the fork's own surface. Raise BECKETT_FULL_TOOLS when
-      # a fork module adds tools.
+      # Lite is upstream's 56, Full is the fork's own surface. Raise the Full count when a
+      # fork module adds tools (both stay literals: the unit suite pins the two count sites).
       - name: Boot + probe MCP endpoint
         shell: pwsh
-        env:
-          BECKETT_FULL_TOOLS: '74'
         run: |
           & "$env:GODOT_BIN" --headless --version | Out-Null
           $probe = @{ GodotExe = "$env:GODOT_BIN"; Port = [int]$env:BECKETT_CI_PORT; ProjectPath = '.' }
           if (Test-Path -LiteralPath 'addons/beckett/tools/runtime_tools.gd') {
-            ./tests/ci-smoke.ps1 @probe -Edition Full -ExpectedTools ([int]$env:BECKETT_FULL_TOOLS)
+            ./tests/ci-smoke.ps1 @probe -Edition Full -ExpectedTools 74
           } else {
             ./tests/ci-smoke.ps1 @probe -Edition Lite -ExpectedTools 56
           }
