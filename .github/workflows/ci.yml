@@ -21,11 +21,10 @@
 # job name: the badge must not be able to stay green silently while the engine people
 # are actually upgrading to is broken. Read the job list, not just the badge.
 #
-# The same file also runs in the private authoring monorepo, whose checkout is the Full
-# edition. The probe step asserts the edition the REPOSITORY must serve, never whatever
-# happens to be on disk: beckettlab's private repo is probed as Full, every other copy (the
-# public repo, forks, mirrors) as Lite. Both probe counts are release.ps1 count sites, so
-# -FixCounts heals them together when the tool surface changes.
+# Fork note (Shman4ik/beckett-godot-mcp): this fork carries its own Full layer
+# (addons/beckett/tools/runtime_tools.gd and the modules after it), so the probe step
+# reads the edition off that sentinel module instead of off the repository owner.
+# Upstream's Lite and Full counts no longer apply here: the fork's counts are below.
 name: ci
 
 on:
@@ -296,22 +295,20 @@ jobs:
       # ci-smoke.ps1 owns the boot, the wait, the assertions, and ALWAYS kills the
       # editor in its finally block. One code path for CI and local runs.
       #
-      # The edition comes from the repository, not the checkout: only a private repo
-      # owned by beckettlab (the authoring monorepo) is probed as Full. Reading it off
-      # the sentinel module instead would fail open, because a Full tree staged into the
-      # public repo by mistake (pack.ps1 -StageDir without -Lite) would then be counted
-      # as Full and pass. Keyed on the repository, that tree is still held to the Lite
-      # count. Anything unexpected (no repository payload, a new owner) lands on Lite,
-      # the strict side.
+      # The edition comes from the checkout: the server itself turns Full when the sentinel
+      # module tools/runtime_tools.gd is on disk (core/mcp_server.gd SENTINEL_FULL_MODULE),
+      # so the probe asks the same file. Each edition is still held to an exact tool count:
+      # Lite is upstream's 56, Full is the fork's own surface. Raise BECKETT_FULL_TOOLS when
+      # a fork module adds tools.
       - name: Boot + probe MCP endpoint
         shell: pwsh
         env:
-          BECKETT_CI_EDITION: ${{ github.repository_owner == 'beckettlab' && github.event.repository.private && 'Full' || 'Lite' }}
+          BECKETT_FULL_TOOLS: '74'
         run: |
           & "$env:GODOT_BIN" --headless --version | Out-Null
           $probe = @{ GodotExe = "$env:GODOT_BIN"; Port = [int]$env:BECKETT_CI_PORT; ProjectPath = '.' }
-          if ($env:BECKETT_CI_EDITION -eq 'Full') {
-            ./tests/ci-smoke.ps1 @probe -Edition Full -ExpectedTools 92
+          if (Test-Path -LiteralPath 'addons/beckett/tools/runtime_tools.gd') {
+            ./tests/ci-smoke.ps1 @probe -Edition Full -ExpectedTools ([int]$env:BECKETT_FULL_TOOLS)
           } else {
             ./tests/ci-smoke.ps1 @probe -Edition Lite -ExpectedTools 56
           }
