@@ -37,8 +37,9 @@ const INERT_EXTS := ["md", "markdown", "rst", "adoc", "ps1", "psm1", "sh", "bash
 const INERT_NAMES := ["license", "licence", "changelog", "changes", "notice", "authors", "contributors", "copying", "readme"]
 ## C# sources: their uses are not traced (a class is used by name from anywhere), so a change selects everything.
 const UNTRACED_EXTS := ["cs", "csproj", "sln", "props", "targets"]
-## Project settings only the editor reads: a resource they name is not something every run loads.
-const EDITOR_ONLY_SETTINGS := ["application/", "editor_plugins/", "editor/", "autoload/"]
+## Project settings a run does not load from: what only the editor reads, and Beckett's own (beckett/test_dir names
+## the folder the suites live in, which is no more loaded by a run than this file is).
+const EDITOR_ONLY_SETTINGS := ["application/", "editor_plugins/", "editor/", "autoload/", "beckett/"]
 
 static var _re_ext: RegEx
 static var _re_ext_path: RegEx
