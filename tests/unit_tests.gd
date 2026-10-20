@@ -223,6 +223,7 @@ func _init() -> void:
 	_g("prompts_edition", _t_prompts_edition())
 	_g("lite_text_labels", _t_lite_text_labels())
 	_g("security_doc_labels", _t_security_doc_labels())
+	_g("extra_modules", _t_extra_modules())
 	print("")
 	print("[unit] %d groups ran to their end" % _groups)
 	if _fail > 0:
@@ -11068,3 +11069,49 @@ func _t_security_doc_labels() -> bool:
 	_ok(unlabeled.is_empty(), "every Full-only tool SECURITY.md names has the word Full within a hundred characters%s" % ("" if unlabeled.is_empty() else ": " + ", ".join(PackedStringArray(unlabeled))))
 	_ok(doc.contains("(Full edition)"), "...and the label it uses is the one on the page: (Full edition)")
 	return true
+
+
+# ---------------------------------------------------------------- project tool modules (beckett/extra_tool_modules)
+
+## A game repository adds its own MCP tools through the project setting; the loader must
+## keep them from shadowing a built-in tool, keep its tier claims to its own names, and
+## report every path it could not load instead of failing the server.
+func _t_extra_modules() -> bool:
+	var X := load("res://addons/beckett/core/extra_modules.gd")
+	var E := load("res://addons/beckett/core/effort.gd")
+	_ok(X.paths_from(" res://a.gd, res://b.gd ,res://a.gd,") == ["res://a.gd", "res://b.gd"], "a comma list is trimmed and de-duplicated")
+	_ok(X.paths_from(PackedStringArray(["res://a.gd", ""])) == ["res://a.gd"], "a PackedStringArray setting lists its non-empty paths")
+	_ok(X.paths_from(7).is_empty() and X.paths_from(null).is_empty(), "a setting of any other type lists nothing")
+	_ok(X.path_error("res://tools/loc_audit.gd") == "", "a res:// script outside the addon is accepted")
+	for bad in ["user://x.gd", "C:/x.gd", "res://x.txt", "res://../x.gd", "res://addons/beckett/tools/x.gd", "res://a\nb.gd"]:
+		_ok(X.path_error(bad) != "", "refused path: %s" % bad.c_escape())
+	var shot_tier: int = E.tier_of("screenshot")
+	var reg = Registry.new()
+	reg.register({"name": "screenshot", "description": "built-in", "handler": Callable(self, "_ok")})
+	var fake := RefCounted.new()
+	var keep: Array = []
+	var report: Array = X.load_all(["res://tests/fixtures/extra_tool_module.gd", "res://tests/fixtures/none.gd", "res://addons/beckett/tools/scene_tools.gd"], reg, fake, keep)
+	_ok(report.size() == 3, "one report entry per listed path")
+	var good: Dictionary = report[0]
+	_ok(good.get("tools", []) == ["fixture_echo"], "the module's own tool is registered")
+	var refused: Array = good.get("refused", [])
+	_ok(refused.size() == 2, "a built-in name and a reserved hint are both refused (got %s)" % str(refused))
+	_ok(str(reg.get_tool("screenshot").get("description", "")) == "built-in", "a project module cannot overwrite a built-in tool")
+	_ok(not reg.has("fixture_big"), "always_load stays reserved for Beckett's own tools")
+	_ok(not reg.get_tool("fixture_echo").has("effort"), "the effort key is consumed, not stored on the spec")
+	_ok(E.tier_of("fixture_echo") == 5, "the declared tier advertises the project tool")
+	_ok(E.tier_of("screenshot") == shot_tier, "a built-in tier never moves")
+	var out: Dictionary = (reg.get_tool("fixture_echo")["handler"] as Callable).call({"text": "hi"})
+	_ok(out.get("text") == "hi" and out.get("has_server") == true, "the module runs and got the server it was loaded for")
+	_ok(keep.size() == 1, "the live module instance is kept alive")
+	_ok(str(report[1].get("error", "")).contains("no such script"), "a missing script is reported, not fatal")
+	_ok(str(report[2].get("error", "")).contains("addon"), "the addon's own modules cannot be listed twice")
+	X.load_all([], reg, fake, [])
+	_ok(E.tier_of("fixture_echo") == 1, "a reload forgets the tiers of modules no longer listed")
+	ProjectSettings.set_setting(X.SETTING, "res://tests/fixtures/extra_tool_module.gd")
+	var Filter := load("res://addons/beckett/core/export_filter.gd")
+	_ok(Filter._is_project_module("res://tests/fixtures/extra_tool_module.gd"), "the export filter keeps a listed module out of the game")
+	_ok(not Filter._is_project_module("res://game/main.gd"), "...and nothing else of the project")
+	ProjectSettings.set_setting(X.SETTING, null)
+	return true
+

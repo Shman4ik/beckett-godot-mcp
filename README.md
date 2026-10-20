@@ -95,6 +95,14 @@ Beckett is one of only a few *embedded* (zero-sidecar) servers in the field, and
 2. Enable **Beckett** in *Project → Project Settings → Plugins* (works on Godot **4.2+**, 4.4+ recommended; CI-verified on 4.4.1, and on 4.6.3 & 4.7.2 across Windows, macOS and Linux). Enabling it **auto-starts** the server and **writes `.mcp.json`**. (Opt out: `beckett/autostart=false`, `beckett/auto_write_client_config=false`. Other options: `BECKETT_PORT` default `8770`, `BECKETT_TOKEN`, `BECKETT_READONLY=1`, `BECKETT_ALLOWLIST`, `BECKETT_CONFIRM_DESTRUCTIVE=1`. Panel has Start/Stop.)
 3. Connect your client. For **Claude Code**, just run `claude` in the project; the auto-written `.mcp.json` wires it up (`/mcp` → **beckett**). For Cursor/others, point at `http://127.0.0.1:8770/mcp` (Streamable HTTP) or press the panel's **Connect Detected Clients** button. See [INSTALL.md](INSTALL.md).
 
+## Project tools
+
+A game can add its own MCP tools without forking the addon. List the scripts in the project setting `beckett/extra_tool_modules`, as an array of `res://` paths or one comma-separated string. Each script is shaped like a built-in module: it has a `var server` and a `func _register(registry)`, and it calls `registry.register({name, description, input_schema, handler})` for every tool. A spec may add `"effort": 1..6` to pick the dial tier that advertises the tool (the default is 1).
+
+- Beckett loads these modules after its own, so a name it already owns is refused and never overwritten. `always_load` and `max_result_chars` are reserved for Beckett's own tools.
+- A script that is missing, does not compile or sits inside `addons/beckett/` is skipped. `doctor` reports it under `tools.project_modules` and as a warning.
+- The export filter keeps the listed scripts out of exported games, as it does with the addon.
+
 ## Status
 
 This is the free, MIT-licensed **Lite** edition — the **inspect → author → run → see** core: reflection/discovery, scene & script authoring for **GDScript and C#** (with `build_csharp` compile-check), **signals**, **resource create/assign**, **files & project settings**, the **play → wait → `logs_read`** dev loop, and the **runtime-observation** tools that let the AI *see* the running game (`screenshot`, `get_remote_tree`, live node state, perf monitors, `game_logs`), plus **Resources + Prompts + dock panel**. **56 tools.** Built and verified live on Godot 4.4.1, 4.6.2 and 4.7 (headless editor + a real HTTP MCP client), and CI-tested on every push across Windows, Linux, and macOS.

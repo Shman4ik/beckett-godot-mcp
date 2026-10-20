@@ -140,13 +140,28 @@ const _DELTA := {
 }
 
 
+## Tiers that project tool modules declared for their own tools (core/extra_modules.gd).
+## Consulted only for names the table above does not map, so a project can never move a
+## built-in tool to another tier.
+static var _extra_tiers := {}
+
+
 ## The minimum effort level at which `tool_name` becomes visible.
 ## Unmapped tools default to 1 so a freshly added tool is never hidden by accident.
 static func tier_of(tool_name: String) -> int:
 	for lvl in range(1, MAX_LEVEL + 1):
 		if tool_name in _DELTA[lvl]:
 			return lvl
-	return 1
+	return int(_extra_tiers.get(tool_name, 1))
+
+
+## Record the tier a project module asked for (clamped to 1..MAX_LEVEL).
+static func set_extra_tier(tool_name: String, level: int) -> void:
+	_extra_tiers[tool_name] = clamp_level(level)
+
+
+static func clear_extra_tiers() -> void:
+	_extra_tiers.clear()
 
 
 ## Is `tool_name` advertised at this effort `level`?

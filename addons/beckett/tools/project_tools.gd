@@ -924,6 +924,10 @@ func _doctor(_args: Dictionary) -> Dictionary:
 	# v1.16: Godot's own bugs for the running version. A separate list on purpose, never
 	# warnings: they are not Beckett state, and on most engines at least one applies, so a
 	# warning would make `ok` false for nearly everyone and stop meaning anything.
+	var project_modules: Array = server.extra_modules if "extra_modules" in server else []
+	for e in project_modules:
+		if e.has("error"):
+			warnings.append("project tool module %s was not loaded: %s (project setting beckett/extra_tool_modules)" % [e["path"], e["error"]])
 	var known_issues: Array = EngineIssuesScript.for_version(Engine.get_version_info())
 
 	var report := {
@@ -932,7 +936,7 @@ func _doctor(_args: Dictionary) -> Dictionary:
 		"beckett_version": ver,
 		"godot_version": String(Engine.get_version_info().get("string", "")),
 		"effort": {"level": effort, "ceiling": ceiling, "source": effort_source, "note": EFFORT_DESKTOP_NOTE},
-		"tools": {"advertised_now": advertised, "at_ceiling": at_ceiling, "disabled": Array(disabled)},
+		"tools": {"advertised_now": advertised, "at_ceiling": at_ceiling, "disabled": Array(disabled), "project_modules": project_modules},
 		"context": {
 			"advertised_tools": advertised,
 			"bytes": context_bytes,

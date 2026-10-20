@@ -29,6 +29,7 @@ extends EditorExportPlugin
 ## Opt out with project setting beckett/strip_from_exports = false.
 
 const MCPClientConfigScript := preload("res://addons/beckett/core/client_config.gd")
+const ExtraModulesScript := preload("res://addons/beckett/core/extra_modules.gd")
 
 const ADDON_PREFIX := "res://addons/beckett/"
 const SETTING := "beckett/strip_from_exports"
@@ -60,6 +61,11 @@ static func is_private_file(path: String) -> bool:
 	return false
 
 
+## A project tool module (core/extra_modules.gd) is editor-only code like the addon itself.
+static func _is_project_module(path: String) -> bool:
+	return ExtraModulesScript.configured().has(path)
+
+
 func _get_name() -> String:
 	return "Beckett"
 
@@ -75,7 +81,7 @@ func _export_file(path: String, _type: String, _features: PackedStringArray) -> 
 		_private += 1
 		skip()
 		return
-	if path == KEEP or not path.begins_with(ADDON_PREFIX):
+	if path == KEEP or not (path.begins_with(ADDON_PREFIX) or _is_project_module(path)):
 		return
 	if not bool(ProjectSettings.get_setting(SETTING, true)):
 		return

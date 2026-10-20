@@ -68,6 +68,7 @@ const ResourcesScript := preload("res://addons/beckett/resources/resources.gd")
 const PromptsScript := preload("res://addons/beckett/prompts/prompts.gd")
 const MCPJobsScript := preload("res://addons/beckett/core/jobs.gd")
 const MCPEffortScript := preload("res://addons/beckett/core/effort.gd")
+const ExtraModulesScript := preload("res://addons/beckett/core/extra_modules.gd")
 const MCPClientConfigScript := preload("res://addons/beckett/core/client_config.gd")
 const MCPVersionScript := preload("res://addons/beckett/core/version.gd")  # serverInfo.version: the one reader of plugin.cfg
 # Shared with the game runtime: the same log-sink module gives the EDITOR process a
@@ -113,6 +114,7 @@ var _client_info: Dictionary = {}    # clientInfo {name, version} from the last 
 var _client_ua: String = ""          # last request's User-Agent (best-effort fallback identity)
 var _last_activity_ms: int = 0       # Time.get_ticks_msec() of the last request (0 = none yet)
 var _tool_modules: Array = []        # keep tool-module instances alive (their Callables hold them)
+var extra_modules: Array = []        # project tool modules: [{path, tools} | {path, error}] (doctor reads it)
 var _effort: int = 6                 # AI effort tier 1..6; caps which tools tools/list advertises (see effort.gd)
 var _max_effort: int = 6             # edition ceiling: Full=6, Lite=4 (its L5/L6 modules aren't shipped)
 
@@ -188,6 +190,12 @@ func _register_tools() -> void:
 		m.server = self
 		m._register(registry)
 		_tool_modules.append(m)
+	# The project's own modules (project setting beckett/extra_tool_modules) come last, so a
+	# built-in name is always taken before a project module could claim it.
+	extra_modules = ExtraModulesScript.load_all(ExtraModulesScript.configured(), registry, self, _tool_modules)
+	for e in extra_modules:
+		if e.has("error"):
+			push_warning("[beckett] project tool module %s not loaded: %s" % [e["path"], e["error"]])
 
 
 ## Start the HTTP endpoint + the runtime bridge. v1.9 (B5): on a bind failure both walk up
