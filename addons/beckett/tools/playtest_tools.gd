@@ -12,9 +12,10 @@ class_name BeckettPlaytestTools
 ## the scene before each run, and reports pass^k: whether EVERY run passed, which steps flipped, and the
 ## first step that looked different from the first run.
 ##
-## This build carries the core ops (save, run, list, show, repeat). mutate (playtest_mutate.gd), run_all
-## (playtest_select.gd) and export_gd (playtest_export.gd + playtest_standalone.gd) are later modules; until
-## they are on disk the dispatcher says so instead of pretending.
+## op=mutate plans faults on what the suite reads (playtest_mutate.gd) and runs it once per fault: a fault no
+## assert notices survived. op=run_all runs every suite, each from its own scene; since=<git ref> runs only
+## the suites a change can reach (playtest_select.gd). op=export_gd writes the suite as a standalone headless
+## test (playtest_export.gd fills in playtest_standalone.gd).
 ##
 ## Every handler is synchronous (the zero-sidecar rule): a window the game runs (a replay, a ui_do flow, a
 ## scene restart) is opened game-side and the editor blocks in MCPJobsScript.poll_until, pumping the
@@ -29,6 +30,8 @@ const RuntimeBridgeScript := preload("res://addons/beckett/core/runtime_bridge.g
 const Invariants := preload("res://addons/beckett/runtime/invariants.gd")  # the rule grammar, validated at save
 const UiDo := preload("res://addons/beckett/runtime/ui_do.gd")  # inject/state step shapes and the inject time budget
 const GameState := preload("res://addons/beckett/runtime/game_state.gd")  # the state step's validator
+const Mutate := preload("res://addons/beckett/tools/playtest_mutate.gd")  # op=mutate: what a suite reads, the faults on it
+const Select := preload("res://addons/beckett/tools/playtest_select.gd")  # op=run_all since=: the suites a change reaches, and git
 
 ## The physics overlap oracle behind the no_overlap assert. A later Full module: loaded when it exists,
 ## and a build without it fails the assert loudly instead of passing it.
@@ -51,12 +54,9 @@ const N_MAX := 50
 const DETAIL_CAP := 200
 const TYPE_CAP := 40
 
-const OPS := "save | run | list | show | repeat"
-const DEFERRED_OPS := {
-	"mutate": "tools/playtest_mutate.gd",
-	"run_all": "tools/playtest_select.gd",
-	"export_gd": "tools/playtest_export.gd and tools/playtest_standalone.gd",
-}
+const OPS := "save | run | list | show | repeat | mutate | run_all | export_gd"
+const MAX_DEFAULT := 50
+const SUITES_SHOWN := 60
 const ASSERT_TYPES := ["node_state", "expr", "screen_text", "screenshot", "perf", "no_overlap"]
 const STEP_KINDS := ["click", "type", "wait", "assert", "input"]
 const PERF_METRICS := ["frames", "frame_ms_min", "frame_ms_avg", "frame_ms_p95", "frame_ms_max", "fps_min", "fps_avg",
@@ -72,6 +72,9 @@ const RESET_TEXT := ("the scene was restarted before every run (scene_reload: a 
 var repeat_cap_ms: int = 45000
 ## How long a restarted scene may take to come back before the batch gives up on it.
 var restart_cap_ms: int = 5000
+## op=run_all since=: what changed in the project folder since a ref, called as fn.call(project_dir, ref) ->
+## {files, count, capped} | {error}. Unset: Select.changed_files (git). The unit suite puts a stand-in here.
+var changed_files_fn: Callable = Callable()
 
 var server  # mcp_server node; only .bridge is used
 
@@ -79,10 +82,10 @@ var server  # mcp_server node; only .bridge is used
 func _register(registry) -> void:
 	registry.register({
 		"name": "playtest",
-		"description": "Saved play-throughs as regression tests. op=save stores a suite (record_input events or ui_do steps, end-state asserts, per-frame invariants) in <test dir>/playtests/<name>.json (project setting beckett/test_dir, default res://tests); op=run replays it on the RUNNING game: verdict pass | fail | blocked; op=repeat runs it n times from a scene restart and reports pass^k, flaky steps and the first divergence; op=list, op=show. Not in this build yet: mutate, run_all, export_gd. Grammar: help(tool=\"playtest\").",
+		"description": "Saved play-throughs as regression tests. op=save stores a suite (record_input events or ui_do steps, end-state asserts, per-frame invariants) under <test dir>/playtests (setting beckett/test_dir, default res://tests). op=run replays it on the RUNNING game: pass | fail | blocked. op=repeat runs it n times from a scene restart: pass^k, flaky steps. op=mutate plants faults and lists those no assert notices. op=run_all runs every suite, or with since=<git ref> only those a change reaches. op=export_gd writes a standalone headless test. op=list, op=show. Grammar: help(tool=\"playtest\").",
 		"help": _help_text(),
 		"input_schema": {"type": "object", "properties": {
-			"op": {"type": "string", "description": "save | run | list | show | repeat (mutate, run_all and export_gd are not in this build yet)"},
+			"op": {"type": "string", "description": "save | run | list | show | repeat | mutate | run_all | export_gd"},
 			"name": {"type": "string", "description": "suite name (a file stem: letters, digits, _ and -)"},
 			"scene": {"type": "string", "description": "op=save: the res:// scene the suite plays (stored; op=run plays the running scene)"},
 			"events": {"type": "array", "description": "op=save: recorded input events (record_input op=stop), or a path to its JSON"},
@@ -95,6 +98,11 @@ func _register(registry) -> void:
 			"save_baseline": {"type": "boolean", "description": "op=run: store this run's perf (and screenshot baselines) as the baseline"},
 			"report": {"type": "boolean", "description": "op=run: also write <name>.report.json beside the suite"},
 			"n": {"type": "integer", "description": "op=repeat: how many runs (1..50, default 5)"},
+			"max": {"type": "integer", "description": "op=mutate: how many faults this call judges (1..50, default all up to 50)"},
+			"from": {"type": "integer", "description": "op=mutate / op=run_all: start at this fault or suite (the next_from of the call before)"},
+			"since": {"type": "string", "description": "op=run_all: only the suites a change since this git ref can reach (HEAD~3, main, a tag)"},
+			"compare": {"type": "boolean", "description": "op=run_all with since: run every suite anyway and report what the selection would have skipped"},
+			"path": {"type": "string", "description": "op=export_gd: the res:// .gd file to write (default <test dir>/beckett/<name>_test.gd)"},
 		}},
 		"handler": Callable(self, "_playtest"),
 	})
@@ -102,8 +110,7 @@ func _register(registry) -> void:
 
 static func _help_text() -> String:
 	return "\n".join(PackedStringArray([
-		"playtest: a saved run of the game, replayed and judged. Ops in this build: save, run, list, show, repeat.",
-		"(mutate, run_all and export_gd come with later modules: the op answers 'not in this build yet'.)",
+		"playtest: a saved run of the game, replayed and judged. Ops: save, run, list, show, repeat, mutate, run_all, export_gd.",
 		"",
 		"SAVE  op=save name=walk scene=res://arena.tscn events=[...] | steps=[...] asserts=[...] invariants=[...]",
 		"  events: the recording record_input op=stop returns (or a path to the JSON it saved). Events stamped with",
@@ -164,6 +171,45 @@ static func _help_text() -> String:
 		"  game is paused in the debugger, or after two runs in a row that timed out (aborted). save_baseline and",
 		"  report are ignored. The restart does not reset autoloads, files or engine singletons.",
 		"",
+		"",
+		"MUTATE  op=mutate name=walk [max=N] [from=K]: does the suite notice when the game is wrong? It must pass on its",
+		"  own first (a clean run from a restart). Then every node and property the suite reads (asserts, rules, steps)",
+		"  gets small faults: a number set to 0, negated, or set to 1 when it was 0; a bool flipped; a node's process_mode",
+		"  set to disabled; the scene's declared signal connection cut. Text values get none (they are listed in",
+		"  skipped). A fault is written with the same set command an inject step uses, on a freshly restarted scene,",
+		"  then the suite runs and the fault is written back. A run that fails or is blocked killed the fault; one that",
+		"  passes means it survived: survivors lists them, each with a hint like 'no assertion notices Player.health = 0",
+		"  (read by asserts[1])', and caught names the assert that noticed each killed one. score (killed / total) is",
+		"  over the faults judged; a run that ended before judging anything is inconclusive (skipped, not counted). At",
+		"  most 50 faults per call (max); when the call's time budget runs out it stops (truncated) and next_from says",
+		"  where to carry on: op=mutate from=<next_from>. The runtime's own node is never a target.",
+		"",
+		"RUN_ALL  op=run_all [since=<git ref>] [compare=true] [from=K]: every suite, in name order, each restarted onto",
+		"  its own scene (a suite with no scene plays the running one; a scene that does not exist is blocked without",
+		"  touching the game); the game is put back on the scene it was on at the end. Result: verdict (fail > blocked >",
+		"  pass), the suite counts and one line per suite with its problem (at most 60 lines: then what did not pass first).",
+		"  A perf bound is blocked, not failed, when a run measures right after a scene restart.",
+		"  since=<git ref> runs only the suites a change can reach: the files git diff --name-only (plus untracked",
+		"  files) lists since the ref, against each suite's closure (its scene, the scripts and resources it loads, what",
+		"  they preload or name by a literal path, the global classes they use, and a folder they spell out or the front",
+		"  of a file name they build). A change to project.godot, to what an autoload or a project setting loads, or to",
+		"  a file no resource references (a JSON a script reads by path) runs every suite; docs, CI files and .uid files",
+		"  run none. The result carries selection {mode, selected, skipped, reasons, since, changed, unreached}:",
+		"  unreached lists changed resources no suite loads. compare=true runs everything anyway and reports what the",
+		"  selection would have skipped: false_negatives counts skipped suites that FAILED (missed by the selection, or",
+		"  already red before the change). The ref goes to git as one argument; an option-like ref is refused.",
+		"",
+		"CI RUNNER  godot --headless --path <project> res://addons/beckett/runtime/playtest_runner.tscn runs every",
+		"  saved suite without the editor and prints one line per suite; it exits 1 on a failure, 2 when something",
+		"  was blocked or the run ended early, and 0 when every suite passed.",
+		"",
+		"EXPORT_GD  op=export_gd name=walk [path=res://...gd] [settle_frames=N] writes the suite as a standalone test",
+		"  (a SceneTree script with no Beckett code in it), by default <test dir>/beckett/<name>_test.gd. Run it with",
+		"  godot --headless --path <project> --script <path>: it prints one line per judgement, then BECKETT_RESULT",
+		"  {json}, and exits 0 on pass, 1 on fail and 2 on blocked. What it cannot run is listed in not_run and in the",
+		"  file's header: screenshot asserts (no rendered frame headless), perf asserts and no_overlap. A file that",
+		"  export_gd did not write is never overwritten; exporting again replaces its own earlier file.",
+		"",
 		"LIST / SHOW  op=list: every suite with its event, step, assert and invariant counts. op=show name=x: the",
 		"  suite file and its last report.",
 	]))
@@ -175,7 +221,7 @@ func _playtest(args: Dictionary) -> Dictionary:
 	var op := str(args.get("op", "")).strip_edges().to_lower()
 	if op == "save":
 		return _save(args)
-	if op in ["run", "list", "show", "repeat"]:
+	if op in ["run", "list", "show", "repeat", "mutate", "run_all", "export_gd"]:
 		var guard := PathGuard.check_read(PLAYTEST_DIR)
 		if guard.has("error"):
 			return guard
@@ -186,29 +232,20 @@ func _playtest(args: Dictionary) -> Dictionary:
 				return _with_read_note(_list(), guard)
 			"show":
 				return _with_read_note(_show(args), guard)
+			"mutate":
+				return _with_read_note(_mutate(args), guard)
+			"run_all":
+				return _with_read_note(_run_all(args), guard)
+			"export_gd":
+				return _with_read_note(_export_gd(args), guard)
 			_:
 				return _with_read_note(_repeat(args), guard)
-	if DEFERRED_OPS.has(op):
-		return _not_in_build(op)
-	return {"error": "unknown op '%s': %s (mutate, run_all and export_gd are not in this build yet)" % [op.left(40), OPS],
+	return {"error": "unknown op '%s': %s" % [op.left(40), OPS],
 		"suggestion": "help(tool=\"playtest\") has the grammar"}
 
 
-func _not_in_build(op: String) -> Dictionary:
-	return {"error": "op=%s is not in this build yet: it needs %s, which this Beckett does not have. This build runs %s." % [op, DEFERRED_OPS[op], OPS],
-		"suggestion": "op=repeat measures how stable a suite is; op=run judges it once"}
-
-
-func _mutate(_args: Dictionary) -> Dictionary:
-	return _not_in_build("mutate")
-
-
-func _run_all(_args: Dictionary) -> Dictionary:
-	return _not_in_build("run_all")
-
-
 func _export_gd(_args: Dictionary) -> Dictionary:
-	return _not_in_build("export_gd")
+	return {"error": "op=export_gd: not wired yet"}
 
 
 ## A reply carrying the outside-read note of the suite folder (nothing when the folder is in the project).
@@ -1069,7 +1106,7 @@ func _eval_perf_assert(a: Dictionary, perf: Dictionary, headless: bool, after_re
 		return out
 	if after_restart:
 		out["status"] = "blocked"
-		out["detail"] = broken + " - not judged: this run measures right after a scene restart (loading, shader compiles), so a broken bound here says nothing about the game"
+		out["detail"] = broken + ", not judged: measured right after a scene restart (loading, shader compiles); op=run on the running scene judges it"
 		return out
 	out["status"] = "fail"
 	out["detail"] = broken
@@ -1539,9 +1576,12 @@ func _report_of(name: String, R: Dictionary) -> Dictionary:
 
 # ---------------------------------------------------------------- op=repeat
 
-## Restart the current scene from its file and wait for the fresh one: {ok} or {error}.
-func _restart() -> Dictionary:
-	var r := _cmd({"cmd": "scene_reload"})
+## Restart the current scene (or switch to `scene`) from its file and wait for the fresh one: {ok} or {error}.
+func _restart(scene: String = "") -> Dictionary:
+	var reload := {"cmd": "scene_reload"}
+	if not scene.is_empty():
+		reload["scene"] = scene
+	var r := _cmd(reload)
 	var old_id := 0
 	if _ok(r):
 		old_id = _int_of(r.get("old_id", 0), 0)
@@ -1669,3 +1709,483 @@ func _repeat(args: Dictionary) -> Dictionary:
 	if not notes.is_empty():
 		out["note"] = "; ".join(PackedStringArray(notes))
 	return {"json": out}
+
+
+# ---------------------------------------------------------------- batch helpers (mutate, run_all)
+
+static func _scene_of(doc: Dictionary) -> String:
+	return str(doc.get("scene", "")).strip_edges() if doc.get("scene") != null else ""
+
+
+## Why a suite's scene cannot be played ("" when it can, or when the suite has none: it plays the running one).
+static func _scene_problem(scene: String) -> String:
+	if scene.is_empty():
+		return ""
+	if scene.contains("..") or not (scene.begins_with("res://") or scene.begins_with("user://")):
+		return "the suite's scene %s cannot be played: it is not a scene of this project" % scene.left(160)
+	if not (ResourceLoader.exists(scene) or FileAccess.file_exists(scene)):
+		return "the suite's scene %s cannot be played: it does not exist in this project (re-save the suite with op=save scene=...)" % scene.left(160)
+	return ""
+
+
+## `from` as a whole number >= 0: {from} or {error}.
+static func _from_arg(args: Dictionary) -> Dictionary:
+	if args.get("from") == null:
+		return {"from": 0}
+	var w: Variant = _whole(args["from"])
+	if w == null or int(w) < 0:
+		return {"error": "from must be a whole number >= 0 (the next_from of the call before; got %s)" % str(args["from"]).left(40)}
+	return {"from": int(w)}
+
+
+## One run of a suite from a restart onto its scene, the way a batch runs it: {verdict, units, json} for a
+## judged run, {verdict: "blocked", units: [], reason} when the run itself failed, {error} when the restart did.
+func _batch_run(doc: Dictionary, args: Dictionary, name: String, scene: String, mode: String) -> Dictionary:
+	var rs := _restart(scene)
+	if rs.has("error"):
+		return {"error": str(rs["error"]).left(BREAK_REASON_CAP)}
+	return _batch_play(doc, args, name, mode)
+
+
+## The run itself, on a scene the batch just restarted (and op=mutate may have put a fault into).
+func _batch_play(doc: Dictionary, args: Dictionary, name: String, mode: String) -> Dictionary:
+	if mode != "deterministic":
+		_cmd({"cmd": "tc_unfreeze"}, 2000)  # the restart leaves the scene frozen; a real-time run needs it running
+	var rr := _run_doc(doc, args, {"after_restart": true, "name": name})
+	if rr.has("error"):
+		return {"verdict": "blocked", "units": [], "reason": str(rr["error"]).left(BREAK_REASON_CAP)}
+	var R: Dictionary = rr["json"]
+	return {"verdict": str(R["verdict"]), "units": run_summary(R)["units"], "json": R}
+
+
+## Does this failure end a batch (the game is gone, or paused in the debugger)?
+static func _ends_batch(err: String) -> bool:
+	return is_break(err) or is_disconnect(err) or err.contains("game not running")
+
+
+# ---------------------------------------------------------------- op=mutate
+
+func _mutate(args: Dictionary) -> Dictionary:
+	var name := _sanitize(str(args.get("name", "")))
+	if name.is_empty():
+		return {"error": "op=mutate needs name: the saved suite whose asserts are put to the test (playtest op=list shows them)"}
+	var doc := _load(name)
+	if doc.has("error"):
+		return doc
+	var notes: Array = []
+	var mx := MAX_DEFAULT
+	if args.get("max") != null:
+		var w: Variant = _whole(args["max"])
+		if w == null or int(w) < 1:
+			return {"error": "max must be a whole number from 1 to %d (got %s)" % [MAX_DEFAULT, str(args["max"]).left(40)]}
+		mx = int(w)
+		if mx > MAX_DEFAULT:
+			notes.append("max capped at %d (asked for %d)" % [MAX_DEFAULT, mx])
+			mx = MAX_DEFAULT
+	var fr := _from_arg(args)
+	if fr.has("error"):
+		return fr
+	var from := int(fr["from"])
+	var mode := _mode_of(doc, args)
+	if mode != "steps" and not (doc.get("events") is Array and not (doc["events"] as Array).is_empty()):
+		return {"error": "the suite has no events and no steps: nothing to play (re-save it with op=save)"}
+	var tg := Mutate.targets_of(doc)
+	if (tg["props"] as Array).is_empty() and (tg["nodes"] as Array).is_empty():
+		return {"error": "op=mutate: suite '%s' names no node or property (its asserts, rules and steps read nothing a fault could change), so there is nothing to fault. Add a node_state or expr assert on what the run should leave behind." % name}
+	var scene := _scene_of(doc)
+	var sp := _scene_problem(scene)
+	if not sp.is_empty():
+		return {"error": "op=mutate: " + sp}
+	if not _connected():
+		return {"error": NOT_CONNECTED % "mutate"}
+	var t0 := Time.get_ticks_msec()
+	# 1. The suite must pass on its own, or a fault it "catches" cannot be told from what is already wrong.
+	var clean := _batch_run(doc, args, name, scene, mode)
+	if clean.has("error"):
+		var ce := str(clean["error"])
+		if is_break(ce):
+			return {"error": ce}
+		return {"error": "op=mutate cannot restart the scene for the clean run: %s. A scene built in code has no file to restart from: play_scene a scene file, or judge the suite with playtest op=run." % ce}
+	var longest := Time.get_ticks_msec() - t0
+	if str(clean["verdict"]) != "pass":
+		var why := Mutate.first_problem(clean["units"])
+		if why.is_empty():
+			why = str(clean.get("reason", ""))
+		return {"error": "op=mutate: suite '%s' does not pass on its own (verdict %s%s), so a fault it catches could not be told from what is already wrong. Make it pass first: playtest op=run name=%s shows why, playtest op=repeat name=%s shows whether it is flaky." % [
+			name, str(clean["verdict"]), (": " + why.left(400)) if not why.is_empty() else "", name, name]}
+	# 2. The values the faults start from, read on a fresh scene.
+	var rs := _restart(scene)
+	if rs.has("error"):
+		return {"error": "op=mutate cannot restart the scene to read the start values: %s" % str(rs["error"]).left(BREAK_REASON_CAP)}
+	var cands := _fault_candidates(tg)
+	if cands.has("error"):
+		return {"error": "op=mutate: reading the start values failed: %s" % str(cands["error"])}
+	var conn := Mutate.connection_of(scene, cands["nodes"]) if not scene.is_empty() else {}
+	var plan := Mutate.plan({"props": cands["props"], "nodes": cands["nodes"], "connection": conn})
+	var skipped: Array = cands["skipped"]
+	if plan.is_empty():
+		var left := PackedStringArray()
+		for s in skipped:
+			left.append("%s (%s)" % [str(s["target"]), str(s["why"])])
+		return {"error": "op=mutate: nothing the suite names can be faulted: %s" % "; ".join(left)}
+	# 3. One run per fault, each from a restart: the fault goes in while the restarted scene is still frozen.
+	var planned := plan.size()
+	var caught: Array = []
+	var survivors: Array = []
+	var consumed := 0
+	var batch_size := 0
+	var aborted := ""
+	var truncated := false
+	var timeouts := 0
+	if from >= planned:
+		notes.append("from=%d is past the last fault (%d planned, ids 0 to %d): nothing was run" % [from, planned, planned - 1])
+	else:
+		var todo := plan.slice(from, mini(planned, from + mx))
+		batch_size = todo.size()
+		for k in todo.size():
+			var f: Dictionary = todo[k]
+			var what := "fault %d (%s %s)" % [int(f["id"]), str(f["target"]), str(f["operator"])]
+			if k > 0 and (Time.get_ticks_msec() - t0) + longest > repeat_cap_ms:
+				truncated = true
+				break
+			var tf := Time.get_ticks_msec()
+			var r2 := _restart(scene)
+			if r2.has("error"):
+				aborted = "the scene restart before %s failed, so the batch stops here: %s" % [what, str(r2["error"]).left(BREAK_REASON_CAP)]
+				break
+			var applied := _apply_fault(f)
+			if applied.has("error"):
+				var ae := str(applied["error"])
+				if _ends_batch(ae):
+					aborted = ("putting in %s met the game paused in the debugger, so the batch stops here: %s" if is_break(ae)
+						else "the connection was lost while putting in %s, so the batch stops here: %s") % [what, ae]
+					break
+				skipped.append({"target": str(f["target"]), "operator": str(f["operator"]), "why": "could not be applied: %s" % ae.left(300)})
+				consumed += 1
+				continue
+			var run := _batch_play(doc, args, name, mode)
+			if run.has("reason") and _ends_batch(str(run["reason"])):
+				var re := str(run["reason"])
+				aborted = ("the run of %s met the game paused in the debugger, so the batch stops here (the fault may still be in the game: restart it): %s" if is_break(re)
+					else "the connection was lost during the run of %s, so the batch stops here (the fault may still be in the game: restart it): %s") % [what, re]
+				break
+			_undo_fault(f, applied)
+			consumed += 1
+			longest = maxi(longest, Time.get_ticks_msec() - tf)
+			if run.has("reason"):
+				skipped.append({"target": str(f["target"]), "operator": str(f["operator"]), "why": "inconclusive: the run ended before anything was judged (%s)" % str(run["reason"]).left(300)})
+				if is_channel_error(str(run["reason"])):
+					timeouts += 1
+					if timeouts >= 2:
+						aborted = "two fault runs in a row timed out (the last: %s): the game stopped answering, so the batch stops here" % what
+						break
+				continue
+			timeouts = 0
+			match Mutate.outcome_of(run):
+				"killed":
+					caught.append({"id": int(f["id"]), "target": f["target"], "operator": f["operator"], "change": f["change"],
+						"by": Mutate.first_problem(run["units"], f["reads"]), "reads": f["reads"]})
+				"survived":
+					survivors.append({"id": int(f["id"]), "target": f["target"], "operator": f["operator"], "change": f["change"],
+						"reads": f["reads"], "hint": Mutate.hint_of(f)})
+				_:
+					skipped.append({"target": str(f["target"]), "operator": str(f["operator"]), "why": "inconclusive: the run judged nothing"})
+	if aborted.is_empty():
+		# One more restart, so a following op=run does not start on the last fault's run.
+		var fin := _restart(scene)
+		if fin.has("error"):
+			notes.append("the restart that ends the batch failed (%s): the game is where the last run left it" % str(fin["error"]).left(300))
+		elif mode != "deterministic":
+			_cmd({"cmd": "tc_unfreeze"}, 2000)
+	var out := {"name": name, "scene": scene, "mode": mode, "planned": planned, "clean": "pass",
+		"total": caught.size() + survivors.size(), "killed": caught.size(), "survived": survivors.size(),
+		"score": Mutate.score_of(caught.size(), survivors.size()), "caught": caught, "survivors": survivors, "skipped": skipped}
+	var not_run := maxi(0, planned - (from + consumed)) if from < planned else 0
+	out["not_run"] = not_run
+	if not_run > 0:
+		out["next_from"] = from + consumed
+	if truncated:
+		out["truncated"] = true
+		notes.append("stopped after %d of %d faults: the next would not fit this call's time budget (%d ms); call again with from=%d" % [consumed, batch_size, repeat_cap_ms, from + consumed])
+	elif aborted.is_empty() and not_run > 0:
+		notes.append("%d fault(s) not run yet (max=%d per call): call again with from=%d" % [not_run, mx, from + consumed])
+	if not aborted.is_empty():
+		out["aborted"] = aborted
+	if not survivors.is_empty():
+		notes.append("each survivor is a change no assertion notices: add an assert (or an invariant) that reads it, then op=mutate again")
+	if not notes.is_empty():
+		out["note"] = "; ".join(PackedStringArray(notes))
+	return {"json": out}
+
+
+## The start values of what the suite reads, from the running game: {props, nodes, skipped} or {error} when
+## the channel failed. Two spellings of one node (GameState, /root/GameState) are one target: the game says
+## which node it resolved, and the reads of both are kept.
+func _fault_candidates(tg: Dictionary) -> Dictionary:
+	var props: Array = []
+	var nodes: Array = []
+	var skipped: Array = []
+	var seen := {}
+	for p in tg["props"]:
+		var node := str(p["node"])
+		var prop := str(p["property"])
+		var target := Mutate.prop_label(node, prop)
+		var r := _cmd({"cmd": "get", "path": node, "prop": prop})
+		if not _ok(r):
+			var e := _err_of(r, "get")
+			if is_channel_error(e) or _ends_batch(e):
+				return {"error": e}
+			skipped.append({"target": target, "why": "could not be read: %s" % e.left(200)})
+			continue
+		var key := "%s|%s" % [str(r.get("resolved", node)), prop]
+		if seen.has(key):
+			_merge_reads(seen[key], p["reads"])
+			continue
+		var v: Variant = r.get("value")
+		var entry := {"node": node, "property": prop, "reads": (p["reads"] as Array).duplicate(), "value": v}
+		seen[key] = entry
+		if Mutate.operators_for(v).is_empty():
+			skipped.append({"target": target, "why": "its value (%s) is not a number or a bool, so no fault is planned on it" % str(v).left(60)})
+			continue
+		props.append(entry)
+	for n in tg["nodes"]:
+		var node := str(n["node"])
+		var r := _cmd({"cmd": "get", "path": node, "prop": "process_mode"})
+		if not _ok(r):
+			var e := _err_of(r, "get")
+			if is_channel_error(e) or _ends_batch(e):
+				return {"error": e}
+			skipped.append({"target": Mutate.label(node), "why": "could not be read: %s" % e.left(200)})
+			continue
+		var key := "node:%s" % str(r.get("resolved", node))
+		if seen.has(key):
+			_merge_reads(seen[key], n["reads"])
+			continue
+		var entry := {"node": node, "reads": (n["reads"] as Array).duplicate(), "process_mode": r.get("value")}
+		seen[key] = entry
+		if _int_of(r.get("value"), 0) == Mutate.PROCESS_MODE_DISABLED:
+			skipped.append({"target": Mutate.label(node), "why": "its processing is already disabled, so disabling it changes nothing"})
+			continue
+		nodes.append(entry)
+	return {"props": props, "nodes": nodes, "skipped": skipped}
+
+
+static func _merge_reads(entry: Dictionary, reads: Array) -> void:
+	for u in reads:
+		if not (entry["reads"] as Array).has(u):
+			(entry["reads"] as Array).append(u)
+
+
+## Put one fault into the restarted scene: {before} for a write (what the game had, for the write-back), {} for a
+## cut connection, {error} when the game would not take it.
+func _apply_fault(f: Dictionary) -> Dictionary:
+	if str(f["kind"]) == "disconnect":
+		var c: Dictionary = f["connection"]
+		var r1 := _cmd({"cmd": "eval", "expr": Mutate.connected_expr(c)})
+		if not _ok(r1):
+			return {"error": _err_of(r1, "eval")}
+		if not CallArgs.to_bool(r1.get("value")):
+			return {"error": "the connection is not live in the restarted scene"}
+		var r2 := _cmd({"cmd": "eval", "expr": Mutate.disconnect_expr(c)})
+		if not _ok(r2):
+			return {"error": _err_of(r2, "eval")}
+		var r3 := _cmd({"cmd": "eval", "expr": Mutate.connected_expr(c)})
+		if not _ok(r3):
+			return {"error": _err_of(r3, "eval")}
+		if CallArgs.to_bool(r3.get("value")):
+			return {"error": "the connection was still live after it was cut"}
+		return {}
+	var r := _cmd({"cmd": "set", "path": str(f["node"]), "prop": str(f["property"]), "value": f["to"]})
+	if not _ok(r):
+		return {"error": _err_of(r, "set")}
+	return {"before": r.get("before", f.get("from"))}
+
+
+## Write a fault back after its run: a restart rebuilds the scene, but not an autoload a fault wrote to.
+func _undo_fault(f: Dictionary, applied: Dictionary) -> void:
+	if str(f["kind"]) == "disconnect" or not applied.has("before"):
+		return
+	_cmd({"cmd": "set", "path": str(f["node"]), "prop": str(f["property"]), "value": applied["before"]})
+
+
+# ---------------------------------------------------------------- op=run_all
+
+func _run_all(args: Dictionary) -> Dictionary:
+	var fr := _from_arg(args)
+	if fr.has("error"):
+		return fr
+	var from := int(fr["from"])
+	var since := str(args.get("since", "")).strip_edges() if args.get("since") != null else ""
+	var compare := CallArgs.flag(args, "compare")
+	if compare and since.is_empty():
+		return {"error": "op=run_all: compare=true needs since=<git ref>: it measures what the selection for that change would have skipped"}
+	if not since.is_empty():
+		var rerr := Select.ref_error(since)
+		if not rerr.is_empty():
+			return {"error": "op=run_all since: %s" % rerr}
+	var found := _suite_names()
+	var names: Array = found["names"]
+	var notes: Array = []
+	if not (found["odd"] as Array).is_empty():
+		notes.append("%d file(s) in %s are not suites op=save could have written, so they were left out: %s" % [(found["odd"] as Array).size(), PLAYTEST_DIR, ", ".join(PackedStringArray(found["odd"])).left(300)])
+	var docs := {}
+	for n in names:
+		docs[n] = _load(str(n))
+	var run_names: Array = names.duplicate()
+	var selection := {}
+	if not since.is_empty():
+		var dir := ProjectSettings.globalize_path("res://")
+		var got: Variant = changed_files_fn.call(dir, since) if changed_files_fn.is_valid() else Select.changed_files(dir, since)
+		if not (got is Dictionary):
+			return {"error": "op=run_all: the list of changed files could not be read"}
+		if (got as Dictionary).has("error"):
+			return {"error": "op=run_all: %s" % str(got["error"])}
+		var files: Array = got.get("files", []) if got.get("files", []) is Array else []
+		var memo := {}
+		var classes := Select.global_classes()
+		var suites: Array = []
+		for n in names:
+			var d: Dictionary = docs[n]
+			var file := "%s/%s.json" % [PLAYTEST_DIR, str(n)]
+			if d.has("error"):
+				suites.append({"name": n, "deps": null, "own": [file]})
+			else:
+				var sd := Select.suite_deps(d, file, classes, memo)
+				suites.append({"name": n, "deps": sd["deps"], "own": sd["own"]})
+		var roots := Select.closure(Select.global_roots(), classes, memo)
+		selection = Select.select(files, suites, roots, CallArgs.to_bool(got.get("capped", false)))
+		selection["since"] = since
+		selection["changed"] = _int_of(got.get("count", files.size()), files.size())
+		if not compare:
+			run_names = (selection["selected"] as Array).duplicate()
+	var total := run_names.size()
+	var out := {"total": total}
+	if not selection.is_empty():
+		out["selection"] = selection
+	if not since.is_empty() and not compare and run_names.is_empty():
+		notes.push_front("no suite is reachable from what changed since %s (%d changed file(s), %d of them can never reach a run): nothing was run" % [since, int(selection["changed"]), int(selection.get("ignored", 0))])
+		return {"json": _run_all_result(out, [], notes)}
+	if total == 0:
+		notes.push_front("no saved suites in %s: playtest op=save makes one" % PLAYTEST_DIR)
+		return {"json": _run_all_result(out, [], notes)}
+	if from >= total:
+		notes.push_front("from=%d is past the last suite (%d to run): nothing was run" % [from, total])
+		return {"json": _run_all_result(out, [], notes)}
+	if not _connected():
+		return {"error": NOT_CONNECTED % "run_all"}
+	# Where the game is now, so the batch can put it back there.
+	var st := _cmd({"cmd": "scene_state"}, 2000)
+	var home := str(st.get("scene", "")) if _ok(st) else ""
+	var todo := run_names.slice(from)
+	var entries: Array = []
+	var results := {}
+	var aborted := ""
+	var truncated := false
+	var next_from := -1
+	var timeouts := 0
+	var t0 := Time.get_ticks_msec()
+	var longest := 0
+	for k in todo.size():
+		if k > 0 and (Time.get_ticks_msec() - t0) + longest > repeat_cap_ms:
+			truncated = true
+			next_from = from + k
+			break
+		var n := str(todo[k])
+		var ts := Time.get_ticks_msec()
+		var e := {"name": n, "verdict": "blocked", "passed": 0, "failed": 0, "blocked": 0, "skipped": 0}
+		var doc: Dictionary = docs[n]
+		var stop := ""
+		if doc.has("error"):
+			e["problem"] = str(doc["error"]).left(DETAIL_CAP)
+		else:
+			var scene := _scene_of(doc)
+			var mode := _mode_of(doc, args)
+			e["mode"] = mode
+			e["scene"] = scene
+			var sp := _scene_problem(scene)
+			if not sp.is_empty():
+				e["problem"] = sp
+			else:
+				var b := _batch_run(doc, args, n, scene, mode)
+				if b.has("json"):
+					timeouts = 0
+					var R: Dictionary = b["json"]
+					e["verdict"] = str(R["verdict"])
+					for key in ["passed", "failed", "blocked", "skipped"]:
+						e[key] = int(R[key])
+					if e["verdict"] != "pass":
+						e["problem"] = Mutate.first_problem(b["units"])
+				else:
+					var err := str(b.get("error", b.get("reason", "")))
+					e["problem"] = (("the scene restart failed: %s" % err) if b.has("error") else err).left(BREAK_REASON_CAP)
+					if _ends_batch(err):
+						stop = ("suite %s met the game paused in the debugger, so the batch stops here: %s" if is_break(err)
+							else "the connection was lost during suite %s, so the batch stops here: %s") % [n, err]
+					elif is_channel_error(err):
+						timeouts += 1
+						if timeouts >= 2:
+							stop = "two suites in a row timed out (the last: %s): the game stopped answering, so the batch stops here" % n
+		e["ms"] = Time.get_ticks_msec() - ts
+		entries.append(e)
+		results[n] = e["verdict"]
+		longest = maxi(longest, int(e["ms"]))
+		if not stop.is_empty():
+			aborted = stop
+			next_from = from + k  # the suite that met it is tried again by the next call
+			break
+	if aborted.is_empty():
+		# Put the game back on the scene it was on, restarted, so a following op=run does not start where the last suite ended.
+		var fin := _restart(home)
+		if fin.has("error"):
+			notes.append("the restart that ends the batch failed (%s): the game is where the last suite left it" % str(fin["error"]).left(300))
+		elif home.is_empty():
+			notes.append("the game's scene had no file to go back to, so the batch ended on the last suite's scene, restarted")
+	if truncated:
+		out["truncated"] = true
+		notes.push_front("stopped after %d of %d suites: the next would not fit this call's time budget (%d ms); call again with from=%d" % [entries.size(), todo.size(), repeat_cap_ms, next_from])
+	if not aborted.is_empty():
+		out["aborted"] = aborted
+	if next_from >= 0 and next_from < total:
+		out["next_from"] = next_from
+	if compare:
+		var cmp := Select.compare(selection, results)
+		cmp["since"] = since
+		if str(selection.get("mode", "")) == "all":
+			cmp["note"] = "the selection chose ALL suites (%s), so it would have skipped nothing" % str(selection.get("why", "")).left(200)
+		else:
+			cmp["note"] = "the selection would run %d and skip %d; of the skipped, %d ran here: %d FAILED (either the selection missed what reaches them, a false negative, or they were already red before the change) and %d were blocked (judged nothing)" % [
+				int(cmp["would_run"]), int(cmp["would_skip"]), int(cmp["checked"]), (cmp["skipped_failed"] as Array).size(), (cmp["skipped_blocked"] as Array).size()]
+		out["compare"] = cmp
+	return {"json": _run_all_result(out, entries, notes)}
+
+
+## The run_all reply: the suite counts and the verdict over every suite that ran, and at most SUITES_SHOWN
+## suite lines (when cut, the ones that did not pass first).
+static func _run_all_result(out: Dictionary, entries: Array, notes: Array) -> Dictionary:
+	var passed := 0
+	var failed := 0
+	var blocked := 0
+	for e in entries:
+		match str(e["verdict"]):
+			"pass":
+				passed += 1
+			"fail":
+				failed += 1
+			_:
+				blocked += 1
+	out["ran"] = entries.size()
+	out["passed"] = passed
+	out["failed"] = failed
+	out["blocked"] = blocked
+	out["verdict"] = verdict_of(failed, blocked)
+	out["ok"] = out["verdict"] == "pass" and not out.has("truncated") and not out.has("aborted")
+	var shown := entries
+	if entries.size() > SUITES_SHOWN:
+		var bad: Array = entries.filter(func(e): return str(e["verdict"]) != "pass")
+		var good: Array = entries.filter(func(e): return str(e["verdict"]) == "pass")
+		shown = (bad + good).slice(0, SUITES_SHOWN)
+		notes.append("%d more suites ran than are listed (the counts cover all of them; what did not pass is listed first)" % (entries.size() - SUITES_SHOWN))
+	out["suites"] = shown
+	if not notes.is_empty():
+		out["note"] = "; ".join(PackedStringArray(notes))
+	return out
