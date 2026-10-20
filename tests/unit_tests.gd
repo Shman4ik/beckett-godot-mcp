@@ -243,6 +243,7 @@ func _init() -> void:
 	_g("lite_text_labels", _t_lite_text_labels())
 	_g("security_doc_labels", _t_security_doc_labels())
 	_g("extra_modules", _t_extra_modules())
+	_g("test_dir", _t_test_dir())
 	print("")
 	print("[unit] %d groups ran to their end" % _groups)
 	if _fail > 0:
@@ -11147,5 +11148,23 @@ func _t_extra_modules() -> bool:
 	_ok(Filter._is_project_module("res://tests/fixtures/extra_tool_module.gd"), "the export filter keeps a listed module out of the game")
 	_ok(not Filter._is_project_module("res://game/main.gd"), "...and nothing else of the project")
 	ProjectSettings.set_setting(X.SETTING, null)
+	return true
+
+
+## beckett/test_dir moves every test file Beckett writes; a value that would leave the project
+## falls back to the default instead of following it.
+func _t_test_dir() -> bool:
+	var T := load("res://addons/beckett/core/test_dir.gd")
+	_ok(T.root_from("res://tests") == "res://tests" and T.root_from(" res://tools/beckett/ ") == "res://tools/beckett", "a res:// folder is taken, trimmed and without its slash")
+	for bad in ["", "res://", "user://t", "C:/t", "res://../t", "res://a/../../t"]:
+		_ok(T.root_from(bad) == T.DEFAULT, "refused test dir falls back: '%s'" % bad)
+	_ok(T.root_from(null) == T.DEFAULT and T.root_from(3) == T.DEFAULT, "a value of another type falls back")
+	ProjectSettings.set_setting(T.SETTING, "res://zz_unit_test_dir")
+	var pt = load("res://addons/beckett/tools/playtest_tools.gd").new() if ResourceLoader.exists("res://addons/beckett/tools/playtest_tools.gd") else null
+	if pt != null:
+		_ok(pt.PLAYTEST_DIR == "res://zz_unit_test_dir/playtests" and pt._baseline_path({"baseline": "a"}) == "res://zz_unit_test_dir/baselines/a.png", "playtest follows the setting for suites and baselines")
+	if ResourceLoader.exists("res://addons/beckett/tools/test_tools.gd"):
+		_ok(load("res://addons/beckett/tools/test_tools.gd").new().DEFAULT_DIR == "res://zz_unit_test_dir", "test_run searches the configured folder by default")
+	ProjectSettings.set_setting(T.SETTING, null)
 	return true
 

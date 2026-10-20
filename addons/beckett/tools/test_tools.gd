@@ -19,7 +19,9 @@ var server  # mcp_server node (unused: tests run in the editor process)
 
 const PathGuard := preload("res://addons/beckett/core/path_guard.gd")  # script and path are reads the caller names
 
-const DEFAULT_DIR := "res://tests"
+const TestDir := preload("res://addons/beckett/core/test_dir.gd")
+## The folder searched when neither script nor path is given (project setting beckett/test_dir).
+var DEFAULT_DIR: String = TestDir.root()
 const _SKIP_DIRS := [".godot", ".git", ".import"]
 const MAX_SCRIPTS := 200
 ## Most result rows a reply carries; failures always come first.

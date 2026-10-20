@@ -6,7 +6,7 @@ class_name BeckettPlaytestTools
 ##
 ## A suite is a recorded run (input events from record_input, stamped with the physics frame `f`) or a
 ## ui_do steps flow, plus end-state asserts and per-frame invariants, stored as
-## res://tests/playtests/<name>.json. op=run replays it on the RUNNING game and judges it: every assert,
+## <beckett/test_dir, default res://tests>/playtests/<name>.json. op=run replays it on the RUNNING game and judges it: every assert,
 ## step and rule gets pass | fail | skip | blocked, and the run gets the verdict pass | fail | blocked
 ## (blocked: nothing failed, but something could not be judged). op=repeat runs it n times, restarting
 ## the scene before each run, and reports pass^k: whether EVERY run passed, which steps flipped, and the
@@ -34,8 +34,11 @@ const GameState := preload("res://addons/beckett/runtime/game_state.gd")  # the 
 ## and a build without it fails the assert loudly instead of passing it.
 const PHYSICS_OVERLAP_PATH := "res://addons/beckett/runtime/physics_overlap.gd"
 
-const PLAYTEST_DIR := "res://tests/playtests"
-const BASELINE_DIR := "res://tests/baselines"
+const TestDir := preload("res://addons/beckett/core/test_dir.gd")
+## The suite and baseline folders under the project's test root (project setting beckett/test_dir,
+## default res://tests). Read once per module instance, i.e. per editor session.
+var PLAYTEST_DIR: String = TestDir.root() + "/playtests"
+var BASELINE_DIR: String = TestDir.root() + "/baselines"
 ## Default peak signal-to-noise threshold (dB) of a screenshot assert: identical frames and a single
 ## anti-aliasing pixel pass, a recoloured or half-changed frame fails (pinned by the unit suite).
 const SNR_DEFAULT := 30.0
@@ -76,7 +79,7 @@ var server  # mcp_server node; only .bridge is used
 func _register(registry) -> void:
 	registry.register({
 		"name": "playtest",
-		"description": "Saved play-throughs as regression tests. op=save stores a suite (record_input events or ui_do steps, end-state asserts, per-frame invariants) in res://tests/playtests/<name>.json; op=run replays it on the RUNNING game: verdict pass | fail | blocked; op=repeat runs it n times from a scene restart and reports pass^k, flaky steps and the first divergence; op=list, op=show. Not in this build yet: mutate, run_all, export_gd. Grammar: help(tool=\"playtest\").",
+		"description": "Saved play-throughs as regression tests. op=save stores a suite (record_input events or ui_do steps, end-state asserts, per-frame invariants) in <test dir>/playtests/<name>.json (project setting beckett/test_dir, default res://tests); op=run replays it on the RUNNING game: verdict pass | fail | blocked; op=repeat runs it n times from a scene restart and reports pass^k, flaky steps and the first divergence; op=list, op=show. Not in this build yet: mutate, run_all, export_gd. Grammar: help(tool=\"playtest\").",
 		"help": _help_text(),
 		"input_schema": {"type": "object", "properties": {
 			"op": {"type": "string", "description": "save | run | list | show | repeat (mutate, run_all and export_gd are not in this build yet)"},
@@ -891,7 +894,7 @@ static func _perf_spec_error(a: Dictionary) -> String:
 	return ""
 
 
-static func _baseline_path(a: Dictionary) -> String:
+func _baseline_path(a: Dictionary) -> String:
 	var b := str(a.get("baseline", "")).strip_edges()
 	if b.is_empty() or b.contains("://"):
 		return b

@@ -103,6 +103,8 @@ A game can add its own MCP tools without forking the addon. List the scripts in 
 - A script that is missing, does not compile or sits inside `addons/beckett/` is skipped. `doctor` reports it under `tools.project_modules` and as a warning.
 - The export filter keeps the listed scripts out of exported games, as it does with the addon.
 
+The project setting `beckett/test_dir` (default `res://tests`) moves the files Beckett's test tools write: playtest suites go to `<dir>/playtests`, screenshot baselines to `<dir>/baselines`, and `test_run` searches `<dir>` by default. A C# project needs it: on a case-insensitive disk `res://tests` is the same folder as its `Tests/`.
+
 ## Status
 
 This is the free, MIT-licensed **Lite** edition — the **inspect → author → run → see** core: reflection/discovery, scene & script authoring for **GDScript and C#** (with `build_csharp` compile-check), **signals**, **resource create/assign**, **files & project settings**, the **play → wait → `logs_read`** dev loop, and the **runtime-observation** tools that let the AI *see* the running game (`screenshot`, `get_remote_tree`, live node state, perf monitors, `game_logs`), plus **Resources + Prompts + dock panel**. **56 tools.** Built and verified live on Godot 4.4.1, 4.6.2 and 4.7 (headless editor + a real HTTP MCP client), and CI-tested on every push across Windows, Linux, and macOS.
