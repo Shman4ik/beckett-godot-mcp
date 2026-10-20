@@ -55,10 +55,6 @@ const RunTools := preload("res://addons/beckett/tools/run_tools.gd")
 const _PLAYTEST_TOOLS_PATH := "res://addons/beckett/tools/playtest_tools.gd"
 const _PLAYTEST_RUNNER_PATH := "res://addons/beckett/runtime/playtest_runner.gd"
 const _PHYSICS_OVERLAP_PATH := "res://addons/beckett/runtime/physics_overlap.gd"
-# playtest's later modules (op=mutate, op=run_all): a build with the core playtest_tools.gd but without them
-# skips the groups that need them, each on its own file.
-const _PLAYTEST_MUTATE_PATH := "res://addons/beckett/tools/playtest_mutate.gd"
-const _PLAYTEST_SELECT_PATH := "res://addons/beckett/tools/playtest_select.gd"
 
 ## The one Beckett file that is compiled inside a player's shipped game (see _t_export_safety).
 const AUTOLOAD_STUB_PATH := "res://addons/beckett/runtime/beckett_autoload.gd"
@@ -100,38 +96,23 @@ func _init() -> void:
 		_g("playtest_save_checks", _t_playtest_save_checks())
 		_g("playtest_repeat", _t_playtest_repeat())
 		_g("playtest_surface", _t_playtest_surface())
-		if ResourceLoader.exists(_PLAYTEST_MUTATE_PATH):
-			_g("playtest_mutate_plan", _t_playtest_mutate_plan())
-			_g("playtest_mutate_run", _t_playtest_mutate_run())
-			_g("review_mutate_bridge", _t_review_mutate_bridge())
-		else:
-			print("[unit] playtest mutate groups skipped (build without tools/playtest_mutate.gd: op=mutate not in it)")
-		if ResourceLoader.exists(_PLAYTEST_SELECT_PATH):
-			_g("playtest_select", _t_playtest_select())
-			_g("review_select_bounds", _t_review_select_bounds())
-		else:
-			print("[unit] playtest select groups skipped (build without tools/playtest_select.gd: op=run_all not in it)")
+		_g("playtest_mutate_plan", _t_playtest_mutate_plan())
+		_g("playtest_mutate_run", _t_playtest_mutate_run())
+		_g("playtest_select", _t_playtest_select())
+		_g("review_select_bounds", _t_review_select_bounds())
 		_g("review_screenshot_actual", _t_review_screenshot_actual())
-		if ResourceLoader.exists(_EXPORT_PATH) and ResourceLoader.exists(_STANDALONE_PATH) and ResourceLoader.exists(_PLAYTEST_RUNNER_PATH) and ResourceLoader.exists(_PHYSICS_OVERLAP_PATH):
-			_g("review_early_end", _t_review_early_end())
-		else:
-			print("[unit] review_early_end skipped (build without the exporter, the headless runner or the overlap oracle it runs)")
+		_g("review_mutate_bridge", _t_review_mutate_bridge())
+		_g("review_early_end", _t_review_early_end())
 		_g("review_batch_end_state", _t_review_batch_end_state())
-		if ResourceLoader.exists(_PLAYTEST_SELECT_PATH) and ResourceLoader.exists(_PLAYTEST_MUTATE_PATH):
-			_g("playtest_run_all", _t_playtest_run_all())
-		else:
-			print("[unit] playtest_run_all skipped (build without tools/playtest_select.gd and tools/playtest_mutate.gd)")
+		_g("playtest_run_all", _t_playtest_run_all())
 		_g("playtest_break", _t_playtest_break())
 		_g("playtest_state_step", _t_playtest_state_step())
-		if ResourceLoader.exists(_EXPORT_PATH) and ResourceLoader.exists(_STANDALONE_PATH):
-			_g("export_generator", _t_export_generator())
-			_g("export_hostile", _t_export_hostile())
-			_g("review_export_literals", _t_review_export_literals())
-			_g("export_parity", await _t_export_parity())
-			_g("export_tool", _t_export_tool())
-			_g("export_standalone_run", _t_export_standalone_run())
-		else:
-			print("[unit] playtest export groups skipped (build without tools/playtest_export.gd + playtest_standalone.gd: op=export_gd not in it)")
+		_g("export_generator", _t_export_generator())
+		_g("export_hostile", _t_export_hostile())
+		_g("review_export_literals", _t_review_export_literals())
+		_g("export_parity", await _t_export_parity())
+		_g("export_tool", _t_export_tool())
+		_g("export_standalone_run", _t_export_standalone_run())
 	else:
 		print("[unit] playtest groups skipped (Lite build: module trimmed)")
 	if ResourceLoader.exists(_PLAYTEST_RUNNER_PATH):
@@ -6102,20 +6083,13 @@ func _t_playtest_surface() -> bool:
 		longest = maxi(longest, str((props[k] as Dictionary).get("description", "")).length())
 	_ok(longest <= 130, "every argument description is within 130 characters (longest %d)" % longest)
 	var help := str(t["help"])
-	for needle in ["VERDICTS", "blocked", "INVARIANTS", "first_violation", "INJECT", "REPEAT", "pass_all", "pass^k", "flaky_steps", "flaky_blocked", "first_divergence", "pass_rate", "truncated", "get_node_or_null", "frame_ms_p95", "perf_diff", "perf_baseline_comparable", "kind:\"inject\""]:
+	for needle in ["VERDICTS", "blocked", "INVARIANTS", "first_violation", "INJECT", "REPEAT", "pass_all", "pass^k", "flaky_steps", "flaky_blocked", "first_divergence", "pass_rate", "truncated", "get_node_or_null", "frame_ms_p95", "perf_diff", "perf_baseline_comparable", "exits 1 on a failure, 2 when", "kind:\"inject\""]:
 		_ok(help.contains(needle), "help(playtest) documents %s" % needle)
 	var reg2 = Registry.new()
 	var runtime_tools = load("res://addons/beckett/tools/runtime_tools.gd").new()
 	runtime_tools._register(reg2)
 	var ui_do: Dictionary = reg2.get_tool("ui_do")
 	_ok(str(ui_do["help"]).contains("inject") and str((ui_do["input_schema"]["properties"]["steps"])["description"]).contains("inject") and str(ui_do["help"]).contains("blocked"), "ui_do's help and steps schema list the inject step and the blocked status")
-	# The text of the later modules (the headless runner's exit codes, op=mutate, op=run_all): a build without them
-	# must not advertise them, so these needles are held only where every one of them is on disk.
-	if not (ResourceLoader.exists(_PLAYTEST_MUTATE_PATH) and ResourceLoader.exists(_PLAYTEST_SELECT_PATH) and ResourceLoader.exists(_EXPORT_PATH)
-			and ResourceLoader.exists(_STANDALONE_PATH) and ResourceLoader.exists(_PLAYTEST_RUNNER_PATH)):
-		print("  skip  the mutate / run_all / runner surface needles: this build has no playtest_mutate, playtest_select, playtest_export, playtest_standalone or playtest_runner")
-		return true
-	_ok(help.contains("exits 1 on a failure, 2 when"), "help(playtest) documents exits 1 on a failure, 2 when")
 	# M5b: op=mutate and op=run_all (since / compare)
 	_ok(desc.contains("mutate") and desc.contains("run_all") and desc.contains("since=<git ref>") and desc.length() <= 600, "the description names mutate and run_all since=<git ref>, still inside 600 (%d)" % desc.length())
 	_ok(props.has("max") and props.has("from") and props.has("since") and props.has("compare") and str(props["op"]["description"]).contains("mutate") and str(props["op"]["description"]).contains("run_all"), "the schema has max, from, since and compare, and op lists mutate and run_all")
@@ -8060,14 +8034,11 @@ func _t_playtest_state_step() -> bool:
 	var doc: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(file))
 	_ok(int(doc["schema_version"]) == 2 and (doc["steps"] as Array)[0].has("state"), "a suite that uses a state step is saved as schema 2, so a Beckett that does not know the step refuses the suite instead of failing it as an unknown step")
 	_ok(PT.schema_for([{"state": {}}], []) == 2 and PT.schema_for([{"kind": "state"}], []) == 2 and PT.schema_for([{"click": "x"}], []) == 1, "schema_for knows both spellings, and leaves a suite without one at 1")
-	if not ResourceLoader.exists(_PLAYTEST_MUTATE_PATH):
-		print("  skip  op=mutate's count of the state step: this build has no tools/playtest_mutate.gd")
-	else:
-		var Mut = load(_PLAYTEST_MUTATE_PATH)
-		var targets: Dictionary = Mut.targets_of(doc)
-		var nodes: Array = targets["nodes"]
-		_ok(nodes.size() == 1 and str(nodes[0]["node"]) == "Player" and nodes[0]["reads"] == ["steps[0]", "steps[1]"] and (targets["props"] as Array).is_empty(),
-			"op=mutate counts the node a state step reads (and no property: the state's keys are not properties): %s" % str(targets))
+	var Mut = load("res://addons/beckett/tools/playtest_mutate.gd")
+	var targets: Dictionary = Mut.targets_of(doc)
+	var nodes: Array = targets["nodes"]
+	_ok(nodes.size() == 1 and str(nodes[0]["node"]) == "Player" and nodes[0]["reads"] == ["steps[0]", "steps[1]"] and (targets["props"] as Array).is_empty(),
+		"op=mutate counts the node a state step reads (and no property: the state's keys are not properties): %s" % str(targets))
 	_pt_cleanup([name], made_dir)
 	return true
 
@@ -10174,11 +10145,6 @@ func _t_review_batch_end_state() -> bool:
 	_ok(int(cut["runs"]) == 1 and str(cut.get("aborted", "")).length() > 0 and g.sent.count("scene_reload") == 2, "a batch that could not restart the scene stops there, says why, and does not try a final restart on top of it")
 	g.fail_reload_at = -1
 	_pt_cleanup([suite], false)  # run_all runs every saved suite: this one is for another game
-	if not ResourceLoader.exists(_PLAYTEST_SELECT_PATH):
-		print("  skip  the op=run_all end state: this build has no tools/playtest_select.gd")
-		_pt_cleanup([], made_dir)
-		DirAccess.remove_absolute(_MU_SCENE)
-		return true
 	# op=run_all puts the game back where it found it, restarted
 	var g2 := _MutantGame.new()
 	var a_scene := _MU_DIR + "/a.tscn"
