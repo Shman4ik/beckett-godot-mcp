@@ -32,6 +32,7 @@ const UiDo := preload("res://addons/beckett/runtime/ui_do.gd")  # inject/state s
 const GameState := preload("res://addons/beckett/runtime/game_state.gd")  # the state step's validator
 const Mutate := preload("res://addons/beckett/tools/playtest_mutate.gd")  # op=mutate: what a suite reads, the faults on it
 const Select := preload("res://addons/beckett/tools/playtest_select.gd")  # op=run_all since=: the suites a change reaches, and git
+const PlaytestExport := preload("res://addons/beckett/tools/playtest_export.gd")  # op=export_gd: a suite as a standalone test
 
 ## The physics overlap oracle behind the no_overlap assert. A later Full module: loaded when it exists,
 ## and a build without it fails the assert loudly instead of passing it.
@@ -244,8 +245,66 @@ func _playtest(args: Dictionary) -> Dictionary:
 		"suggestion": "help(tool=\"playtest\") has the grammar"}
 
 
-func _export_gd(_args: Dictionary) -> Dictionary:
-	return {"error": "op=export_gd: not wired yet"}
+## op=export_gd: write the suite as a standalone GDScript test (playtest_export.gd fills in playtest_standalone.gd)
+## at `path` (default <test dir>/beckett/<name>_test.gd). A file there is only ever replaced when export_gd wrote
+## it: a script somebody wrote is never overwritten.
+func _export_gd(args: Dictionary) -> Dictionary:
+	var name := _sanitize(str(args.get("name", "")) if args.get("name", null) != null else "")
+	if name.is_empty():
+		return {"error": "op=export_gd needs a name: the saved suite to export (playtest op=list shows them)"}
+	var doc := _load(name)
+	if doc.has("error"):
+		return doc
+	var path_raw: Variant = args.get("path", null)
+	var path := str(path_raw).strip_edges() if path_raw != null else ""
+	if path.is_empty():
+		path = PlaytestExport.default_path(name, TestDir.root())
+	var perr := PlaytestExport.path_error(path)
+	if perr.is_empty():
+		perr = PathGuard.write_path_error(path)
+		if not perr.is_empty():
+			perr = "path refused: " + perr
+	if not perr.is_empty():
+		return {"error": "op=export_gd: %s" % perr}
+	var suite_path := "%s/%s.json" % [PLAYTEST_DIR, name]
+	var built := PlaytestExport.build(doc, {"path": path, "source": suite_path, "beckett": _beckett_version(), "settle_frames": args.get("settle_frames", null)})
+	if built.has("error"):
+		return {"error": "op=export_gd: %s" % str(built["error"])}
+	var replaced := false
+	if FileAccess.file_exists(path):
+		if not FileAccess.get_file_as_string(path).begins_with(PlaytestExport.GENERATED_MARK):
+			return {"error": "op=export_gd: %s exists and was not written by export_gd: a script somebody wrote is never overwritten. Pass another path, or move that file" % path}
+		replaced = true
+	var source := str(built["source"])
+	var werr := _write_text(path, source)
+	if not werr.is_empty():
+		return {"error": "op=export_gd: %s" % werr}
+	var scene := str(doc.get("scene", ""))
+	var notes: Array = (built["notes"] as Array).duplicate()
+	if not FileAccess.file_exists(scene) and not ResourceLoader.exists(scene):
+		notes.append("scene %s does not exist in this project (yet): the test reports blocked until it does" % scene.left(200))
+	var out := {"path": path, "bytes": source.to_utf8_buffer().size(), "mode": built["mode"], "scene": scene, "counts": built["counts"],
+		"not_run": built["not_run"], "notes": notes,
+		"run": "\"%s\" --headless --path \"%s\" --script %s" % [OS.get_executable_path(), ProjectSettings.globalize_path("res://").trim_suffix("/"), path],
+		"exit_codes": "0 pass, 1 fail, 2 blocked (its last line is BECKETT_RESULT {json})"}
+	if replaced:
+		out["replaced"] = true
+	return {"json": out}
+
+
+## Write a text file, making its folder; "" on success.
+static func _write_text(path: String, text: String) -> String:
+	var dir := path.get_base_dir()
+	if not dir.is_empty() and not DirAccess.dir_exists_absolute(dir):
+		var derr := DirAccess.make_dir_recursive_absolute(dir)
+		if derr != OK:
+			return "cannot create %s: %s" % [dir, error_string(derr)]
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		return "cannot write %s: %s" % [path, error_string(FileAccess.get_open_error())]
+	f.store_string(text)
+	f.close()
+	return ""
 
 
 ## A reply carrying the outside-read note of the suite folder (nothing when the folder is in the project).
