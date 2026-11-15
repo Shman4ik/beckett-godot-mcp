@@ -398,22 +398,42 @@ static func schema_for(steps: Variant, invariants: Variant, asserts: Variant = [
 # ---------------------------------------------------------------- perf baseline fingerprint (pure)
 
 ## Are two setups' fingerprints alike? {comparable: true | false | "unknown", mismatch: {field: [baseline, now]}}.
-## A field one side could not read (missing, null, "") is skipped: it is not evidence of another setup.
+## A field one side could not read (missing, null, "") is skipped: it is not evidence of another setup. perf_clock is
+## the exception (1.17): once either side names the clock that timed it, a side that names none was timed by clock 1
+## (Performance.TIME_PROCESS, before 1.17), and so was a baseline with no fingerprint at all.
 static func fingerprint_compare(base: Variant, now: Variant) -> Dictionary:
-	if not (base is Dictionary) or (base as Dictionary).is_empty():
-		return {"comparable": "unknown", "mismatch": {}}
 	var cur: Dictionary = now if now is Dictionary else {}
+	var has_base := base is Dictionary and not (base as Dictionary).is_empty()
+	var b_clock := _clock_of(base)
+	var c_clock := _clock_of(cur)
+	if not has_base and c_clock.is_empty():
+		return {"comparable": "unknown", "mismatch": {}}
 	var mismatch := {}
-	for k in base:
-		var b: Variant = base[k]
-		if not cur.has(k):
-			continue
-		var c: Variant = cur[k]
-		if b == null or c == null or str(b).is_empty() or str(c).is_empty():
-			continue
-		if str(b) != str(c):
-			mismatch[k] = [b, c]
+	if has_base:
+		for k in base:
+			if str(k) == "perf_clock":
+				continue
+			var b: Variant = base[k]
+			if not cur.has(k):
+				continue
+			var c: Variant = cur[k]
+			if b == null or c == null or str(b).is_empty() or str(c).is_empty():
+				continue
+			if str(b) != str(c):
+				mismatch[k] = [b, c]
+	if not (b_clock.is_empty() and c_clock.is_empty()):
+		var bc := "1" if b_clock.is_empty() else b_clock
+		var cc := "1" if c_clock.is_empty() else c_clock
+		if bc != cc:
+			mismatch["perf_clock"] = [bc, cc]
 	return {"comparable": mismatch.is_empty(), "mismatch": mismatch}
+
+
+static func _clock_of(fp: Variant) -> String:
+	if not (fp is Dictionary):
+		return ""
+	var v: Variant = (fp as Dictionary).get("perf_clock", null)
+	return "" if v == null else str(v)
 
 
 static func comparability_note(cmp: Dictionary) -> String:
@@ -426,8 +446,15 @@ static func comparability_note(cmp: Dictionary) -> String:
 		for k in mm:
 			var pair: Array = mm[k] if mm[k] is Array else [mm[k], ""]
 			parts.append("%s %s -> %s" % [str(k), str(pair[0]), str(pair[1]) if pair.size() > 1 else ""])
-		return ("PERF BASELINE NOT COMPARABLE: the baseline was measured on another setup (%s), so perf_diff compares unlike numbers."
-			+ " Run once with save_baseline=true on this setup to replace it. Absolute perf asserts are not affected.") % ", ".join(parts)
+		var clock: Array = mm.get("perf_clock", []) if mm.get("perf_clock", []) is Array else []
+		if clock.size() == 2 and int(str(clock[1])) < int(str(clock[0])):
+			# The baseline is newer than the game's runtime: re-capturing would only store the old clock's numbers.
+			return ("PERF BASELINE NOT COMPARABLE: the baseline was timed by a newer perf clock than the running game's (%s): the game still runs a runtime older than Beckett 1.17."
+				+ " Restart the game so it loads the current runtime, then run again. Absolute perf asserts are not affected.") % ", ".join(parts)
+		var why := "the baseline was measured on another setup (%s), so perf_diff compares unlike numbers." % ", ".join(parts)
+		if clock.size() == 2:
+			why += " perf_clock 1 is the once-a-second Performance.TIME_PROCESS reading Beckett used before 1.17, and 1.17 times every frame, so the old baseline is another measurement."
+		return ("PERF BASELINE NOT COMPARABLE: %s Run once with save_baseline=true on this setup to replace it. Absolute perf asserts are not affected.") % why
 	return ("PERF BASELINE UNVERIFIED: the stored baseline has no fingerprint (saved before 1.16), so nothing says it was measured on this setup."
 		+ " Run once with save_baseline=true to stamp it. Absolute perf asserts are not affected.")
 
@@ -1332,7 +1359,7 @@ static func _fingerprint_from(side: Dictionary, doc: Dictionary) -> Dictionary:
 		"viewport": "%dx%d" % [int(ProjectSettings.get_setting("display/window/size/viewport_width", 0)), int(ProjectSettings.get_setting("display/window/size/viewport_height", 0))],
 		"suite": suite_hash(doc),
 	}
-	for k in ["gpu", "gpu_vendor", "display", "rendering_driver", "build"]:
+	for k in ["gpu", "gpu_vendor", "display", "rendering_driver", "build", "perf_clock"]:
 		if side.has(k) and side[k] != null:
 			out[k] = str(side[k])
 	return out
