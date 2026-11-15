@@ -667,26 +667,14 @@ static func _fail_text(what: String, err: String) -> String:
 	return ("%s failed: %s" % [what, err]).left(BREAK_REASON_CAP)
 
 
+const TypedJson := preload("res://addons/beckett/core/typed_json.gd")  # same(): the one node_state rule (1.17)
+
+
+## node_state's equality: TypedJson.same, the rule the runner, the exported test, ui_do and assert_node_state judge by
+## too (1.17). 12 matches the 12.0 JSON makes of it but not 123457 for 123456, and a vector read as [0, 6, 11] matches
+## "0 6 11", "Vector3(0, 6, 11)", {x, y, z} and the "(0.0, 6.0, 11.0)" a game from before 1.17 sent.
 func _values_equal(a: Variant, b: Variant) -> bool:
-	if (a is int or a is float) and (b is int or b is float):
-		return is_equal_approx(float(a), float(b))
-	if a is bool or b is bool:
-		return str(a).to_lower() == str(b).to_lower()
-	if a is Array and b is Array:
-		if (a as Array).size() != (b as Array).size():
-			return false
-		for i in (a as Array).size():
-			if not _values_equal(a[i], b[i]):
-				return false
-		return true
-	if a is Dictionary and b is Dictionary:
-		if (a as Dictionary).size() != (b as Dictionary).size():
-			return false
-		for k in a:
-			if not (b as Dictionary).has(k) or not _values_equal(a[k], b[k]):
-				return false
-		return true
-	return str(a) == str(b)
+	return TypedJson.same(a, b)
 
 
 ## A suite name as a file stem: no folders, no .json, only letters, digits, _ and -.
