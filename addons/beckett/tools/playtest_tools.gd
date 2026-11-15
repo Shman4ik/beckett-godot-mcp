@@ -926,6 +926,14 @@ static func _steps_error(steps: Array) -> String:
 				known = true
 		if not known:
 			return "steps[%d] is not a step: each is one of click, type, wait, assert, input, inject, state (help(tool=\"ui_do\"))" % i
+		# A wait or assert condition is an expression the flow evaluates: one that calls str_to_var is refused here, before
+		# anything is written, as the game would refuse it when the flow runs.
+		for k in ["wait", "assert"]:
+			var body: Variant = d.get(k, null)
+			if body is Dictionary and (body as Dictionary).get("condition", null) is String:
+				var unsafe := Invariants.unsafe_call(str((body as Dictionary)["condition"]))
+				if not unsafe.is_empty():
+					return "op=save: steps[%d]: %s" % [i, unsafe]
 	return ""
 
 
@@ -944,6 +952,9 @@ func _assert_error(a: Variant, i: int, suite: String) -> String:
 			var cond := str(d.get("condition", "")).strip_edges()
 			if cond.is_empty():
 				return "%s needs a condition (a GDScript expression on the scene root)" % at
+			var unsafe := Invariants.unsafe_call(cond)
+			if not unsafe.is_empty():
+				return "op=save: asserts[%d]: %s" % [i, unsafe]
 			var ex := Expression.new()
 			if ex.parse(cond) != OK:
 				return "%s: the condition does not parse: %s" % [at, ex.get_error_text()]

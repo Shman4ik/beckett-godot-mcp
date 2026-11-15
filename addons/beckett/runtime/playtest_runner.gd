@@ -436,6 +436,10 @@ func _eval_expr(d: Dictionary) -> Dictionary:
 	var cond := str(d.get("condition", "")).strip_edges()
 	if cond.is_empty():
 		return {"type": "expr", "status": "fail", "detail": "expr needs a condition"}
+	# The game's eval refuses such an expression before parsing it, and op=run reports that refusal as a fail.
+	var unsafe := Invariants.unsafe_call(cond)
+	if not unsafe.is_empty():
+		return {"type": "expr", "status": "fail", "detail": ("%s: expr refused: %s" % [cond.left(120), unsafe]).left(DETAIL_CAP)}
 	var ex := Expression.new()
 	if ex.parse(cond) != OK:
 		return {"type": "expr", "status": "fail", "detail": ("%s: expr parse error: %s" % [cond.left(120), ex.get_error_text()]).left(DETAIL_CAP)}
