@@ -65,8 +65,7 @@ const PERF_METRICS := ["frames", "frame_ms_min", "frame_ms_avg", "frame_ms_p95",
 const OVERLAP_KEYS := ["paths", "group", "min_depth", "max_pairs", "max_bodies", "budget_ms"]
 
 const NOT_CONNECTED := "game not running/connected: call play_scene, then wait_until condition=game_connected, then playtest op=%s"
-const RESET_TEXT := ("the scene was restarted before every run (scene_reload: a fresh instance from its file, its resources read again,"
-	+ " held input released). NOT reset: autoloads, saved files, engine singletons and static variables, so a suite that depends on them"
+const RESET_NOT := (" NOT reset: autoloads, saved files, engine singletons and static variables, so a suite that depends on them"
 	+ " carries their state from run to run")
 
 ## ms budget of one op=repeat call: a run that would not fit is not started (the batch is truncated).
@@ -78,6 +77,24 @@ var restart_cap_ms: int = 5000
 var changed_files_fn: Callable = Callable()
 
 var server  # mcp_server node; only .bridge is used
+
+
+## What op=repeat's restart (the runtime's scene_reload) resets, in the words its reply carries. `deep`: the engine has
+## the deep reload (CACHE_MODE_REPLACE_DEEP, Godot 4.3+), so the resource files the scene names are read again too; on
+## 4.2 they come from the cache, and a change a run made to one carries into the next run (MCPRuntime.deep_replace_mode).
+static func reset_text(deep: bool) -> String:
+	if deep:
+		return ("the scene was restarted before every run (scene_reload: a fresh instance from its file, its resources (the .tres"
+			+ " files it names) re-read from disk, held input released)." + RESET_NOT)
+	return ("the scene was restarted before every run (scene_reload: a fresh instance from its file, held input released), but the"
+		+ " resource files it names (.tres) come from the cache on this Godot (no deep reload before 4.3), so a change a run made to"
+		+ " one carries into the next run." + RESET_NOT)
+
+
+## Does this engine have the deep reload the restart uses? Looked up by name, as the runtime does: a constant named in
+## code would stop this script from parsing on 4.2.
+static func _deep_reload() -> bool:
+	return ClassDB.class_has_integer_constant("ResourceLoader", "CACHE_MODE_REPLACE_DEEP")
 
 
 func _register(registry) -> void:
@@ -1755,7 +1772,7 @@ func _repeat(args: Dictionary) -> Dictionary:
 	var agg := aggregate(runs)
 	var out := {"name": name, "runs": agg["runs"], "requested": n, "passes": agg["passes"], "fails": agg["fails"], "blocked": agg["blocked"],
 		"pass_rate": agg["pass_rate"], "verdict": verdict_of(int(agg["fails"]), int(agg["blocked"])), "outcomes": agg["outcomes"],
-		"steps": agg["steps"], "flaky_steps": agg["flaky_steps"], "first_divergence": agg["first_divergence"], "mode": mode, "reset": RESET_TEXT}
+		"steps": agg["steps"], "flaky_steps": agg["flaky_steps"], "first_divergence": agg["first_divergence"], "mode": mode, "reset": reset_text(_deep_reload())}
 	out["pass_all"] = not truncated and aborted.is_empty() and int(agg["runs"]) == n and int(agg["passes"]) == n
 	if not (agg["flaky_blocked"] as Array).is_empty():
 		out["flaky_blocked"] = agg["flaky_blocked"]
