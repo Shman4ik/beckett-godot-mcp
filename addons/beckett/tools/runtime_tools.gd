@@ -28,6 +28,12 @@ const PathGuard := preload("res://addons/beckett/core/path_guard.gd")  # recordi
 
 const NOT_RUNNING := "game not running (no runtime connection). Call play_scene first, then wait_until condition=game_connected."
 
+## runtime_call expr=: the most characters of JSON its value may take in a reply. A longer list or dictionary keeps
+## its first entries, a longer text its first characters, and the reply says what was cut.
+const EXPR_RESULT_MAX := 8000
+## How much of an expression an error quotes back.
+const EXPR_QUOTE_MAX := 200
+
 ## Selector fields every node-targeting tool accepts (same set as runtime_observe_tools).
 const SELECTOR_PROPS := {
 	"path": {"type": "string", "description": "node path in the running game (name, relative, or /root/...)"},
@@ -216,11 +222,14 @@ func _register(registry) -> void:
 	})
 	registry.register({
 		"name": "runtime_call",
-		"description": "Call a method on a LIVE node of the RUNNING game and return its result (arguments coerced to the method's types; node paths as arguments resolve to nodes). Target by path or selector.",
+		"description": "Call a method on a LIVE node of the RUNNING game and return its result (arguments coerced to the method's types; node paths as arguments resolve to nodes), or evaluate one GDScript expression there with expr= (the node as self, inputs bound by name; it can change the game). Target by path or selector.",
+		"help": "method=<name> args=[...]: call one method on the node path= or a selector names.\n\nexpr=<GDScript expression>: evaluate it in the running game and get its value back, typed (an int stays an int, a transform comes back nested). With no path or selector it runs on the scene root; with one, on that node (self). inputs={name: value} binds names the expression reads, e.g. expr=\"get_node(n).hp + k\" inputs={\"n\": \"Player\", \"k\": 1}; a name that already means something (max, str, Color, PI, self, true) is refused. Engine singletons (OS, ResourceLoader) are not names an expression knows, and str_to_var / bytes_to_var_with_objects are refused. Errors quote the expression; a value over %d characters of JSON is cut, with a note. An expression is not sandboxed: it reaches whatever the game's scene tree reaches." % EXPR_RESULT_MAX,
 		"input_schema": {"type": "object", "properties": _with_selector({
-			"method": {"type": "string", "description": "method name"},
+			"method": {"type": "string", "description": "method name (or pass expr)"},
 			"args": {"type": "array", "description": "arguments (vectors as [x,y], colors as \"#rrggbb\")"},
-		}), "required": ["method"]},
+			"expr": {"type": "string", "description": "one GDScript expression to evaluate instead of a method call (self is the node named, else the scene root)"},
+			"inputs": {"type": "object", "description": "expr: {name: value} bound as names the expression reads"},
+		})},
 		"handler": Callable(self, "_runtime_call"),
 	})
 	registry.register({
@@ -747,12 +756,122 @@ func _reload_shader(args: Dictionary) -> Dictionary:
 
 
 func _runtime_call(args: Dictionary) -> Dictionary:
+	var has_expr := args.has("expr") and args["expr"] != null and not str(args["expr"]).strip_edges().is_empty()
+	var has_method := args.has("method") and args["method"] != null and not str(args["method"]).strip_edges().is_empty()
+	if has_expr and has_method:
+		return {"error": "runtime_call takes method= or expr=, not both", "suggestion": "method=<name> args=[...] calls a method; expr=<GDScript expression> evaluates one"}
+	if has_expr:
+		return _runtime_expr(args)
+	if not has_method:
+		return {"error": "runtime_call needs method=<name> (with args=[...]) to call a method, or expr=<GDScript expression> to evaluate one"}
 	var cmd := {"cmd": "call", "method": str(args.get("method", "")), "args": args.get("args", [])}
 	_add_target(cmd, args)
 	var r := _send(cmd, 10000)
 	if _is_error(r):
 		return r
 	return _as_json(r)
+
+
+## runtime_call expr= (1.17): one expression in the running game, its value back typed. With no node and no inputs it
+## goes through the game's plain eval (on the scene root, as every runtime understands); with a node (path or
+## selector) or inputs, through eval_at, which only a 1.17 runtime knows. It asks for the value alone (bare), so a
+## false-looking value is not evaluated a second time for its reads.
+func _runtime_expr(args: Dictionary) -> Dictionary:
+	var src := str(args["expr"]).strip_edges()
+	var cmd := {"cmd": "eval", "expr": src, "bare": true}
+	var raw_inputs: Variant = args.get("inputs", null)
+	var inputs := {}
+	if raw_inputs != null:
+		if not (raw_inputs is Dictionary):
+			return {"error": "inputs must be an object of {name: value}, e.g. inputs={\"n\": \"Player\"}"}
+		for k in (raw_inputs as Dictionary):
+			var why := input_name_error(str(k))
+			if not why.is_empty():
+				return {"error": why}
+		inputs = raw_inputs
+	var targeted := false
+	for k in ["path", "class", "name", "text"]:
+		if args.has(k) and not str(args[k]).is_empty():
+			targeted = true
+	if targeted or not inputs.is_empty():
+		cmd["cmd"] = "eval_at"
+		_add_target(cmd, args)
+		if not inputs.is_empty():
+			cmd["inputs"] = inputs
+	var r := _send(cmd, 10000)
+	if _is_error(r):
+		var err := str(r["error"])
+		if cmd["cmd"] == "eval_at" and err.begins_with("unknown cmd"):
+			return {"error": "the running game was started before this Beckett (its runtime does not know eval_at), so an expression on a node or with inputs ran nothing. Restart the game (stop_scene, then play_scene) to load the new runtime."}
+		if err.begins_with("expr "):
+			r["error"] = "%s (in: %s)" % [err, _quoted(src)]
+		return r
+	var out := {"resolved": str(r.get("resolved", ".")), "result": r.get("value")}
+	var cut := cut_result(out["result"])
+	if cut.has("note"):
+		out["result"] = cut["value"]
+		out["note"] = cut["note"]
+	return {"json": out}
+
+
+static func _quoted(src: String) -> String:
+	var one := src.replace("\n", " ").replace("\r", " ")
+	return one if one.length() <= EXPR_QUOTE_MAX else one.left(EXPR_QUOTE_MAX) + "..."
+
+
+## A value whose JSON is longer than EXPR_RESULT_MAX characters, cut: {value, note}, or {value} as it came when it fits.
+## A list or a dictionary keeps as many of its first entries as fit, a text its first EXPR_RESULT_MAX characters;
+## anything else that big (a packed array, a matrix) comes back as the text of its JSON, cut the same way.
+static func cut_result(v: Variant) -> Dictionary:
+	var whole := JSON.stringify(v)
+	if whole.length() <= EXPR_RESULT_MAX:
+		return {"value": v}
+	if typeof(v) >= TYPE_PACKED_BYTE_ARRAY and typeof(v) < TYPE_MAX:
+		v = Array(v)  # a split() or a packed buffer: cut entry by entry like any list
+	if v is String:
+		return {"value": (v as String).left(EXPR_RESULT_MAX), "note": "the value is a text of %d characters, cut to its first %d" % [(v as String).length(), EXPR_RESULT_MAX]}
+	if v is Array:
+		var arr: Array = v
+		var kept: Array = []
+		var size := 2
+		for e in arr:
+			size += JSON.stringify(e).length() + 1
+			if size > EXPR_RESULT_MAX:
+				break
+			kept.append(e)
+		while not kept.is_empty() and JSON.stringify(kept).length() > EXPR_RESULT_MAX:
+			kept.pop_back()
+		return {"value": kept, "note": "the value's JSON is %d characters, over %d: kept the first %d of %d entries" % [whole.length(), EXPR_RESULT_MAX, kept.size(), arr.size()]}
+	if v is Dictionary:
+		var d: Dictionary = v
+		var keep := {}
+		var size := 2
+		for k in d:
+			size += JSON.stringify(str(k)).length() + JSON.stringify(d[k]).length() + 2
+			if size > EXPR_RESULT_MAX:
+				break
+			keep[k] = d[k]
+		while not keep.is_empty() and JSON.stringify(keep).length() > EXPR_RESULT_MAX:
+			keep.erase(keep.keys()[-1])
+		return {"value": keep, "note": "the value's JSON is %d characters, over %d: kept the first %d of %d entries" % [whole.length(), EXPR_RESULT_MAX, keep.size(), d.size()]}
+	return {"value": whole.left(EXPR_RESULT_MAX), "note": "the value's JSON is %d characters: it comes back as that text, cut to its first %d" % [whole.length(), EXPR_RESULT_MAX]}
+
+
+## "" when `nm` can name an input of runtime_call expr=, else why not: it is not a name, or it already means something
+## in an expression (a built-in function such as max or str, a type such as Color, a constant such as PI or INF, a
+## keyword such as self or true), which would win over the input or fail to parse. runtime/expr_scope.gd asks the same
+## in the game.
+static func input_name_error(nm: String) -> String:
+	if not nm.is_valid_identifier():
+		return "input '%s' is not a name: letters, digits and _, not starting with a digit" % nm.left(40)
+	var ex := Expression.new()
+	var probe := "\u0001beckett_input"
+	if ex.parse(nm, PackedStringArray([nm])) != OK:
+		return "input '%s' already means something in an expression (a built-in function, type or keyword): rename it" % nm
+	var v: Variant = ex.execute([probe], null, false)
+	if ex.has_execute_failed() or typeof(v) != TYPE_STRING or str(v) != probe:
+		return "input '%s' already means something in an expression (a constant or keyword): rename it" % nm
+	return ""
 
 
 func _runtime_set(args: Dictionary) -> Dictionary:
