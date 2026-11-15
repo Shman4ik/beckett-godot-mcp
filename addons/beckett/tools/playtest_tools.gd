@@ -415,22 +415,42 @@ static func schema_for(steps: Variant, invariants: Variant, asserts: Variant = [
 # ---------------------------------------------------------------- perf baseline fingerprint (pure)
 
 ## Are two setups' fingerprints alike? {comparable: true | false | "unknown", mismatch: {field: [baseline, now]}}.
-## A field one side could not read (missing, null, "") is skipped: it is not evidence of another setup.
+## A field one side could not read (missing, null, "") is skipped: it is not evidence of another setup. perf_clock is
+## the exception (1.17): once either side names the clock that timed it, a side that names none was timed by clock 1
+## (Performance.TIME_PROCESS, before 1.17), and so was a baseline with no fingerprint at all.
 static func fingerprint_compare(base: Variant, now: Variant) -> Dictionary:
-	if not (base is Dictionary) or (base as Dictionary).is_empty():
-		return {"comparable": "unknown", "mismatch": {}}
 	var cur: Dictionary = now if now is Dictionary else {}
+	var has_base := base is Dictionary and not (base as Dictionary).is_empty()
+	var b_clock := _clock_of(base)
+	var c_clock := _clock_of(cur)
+	if not has_base and c_clock.is_empty():
+		return {"comparable": "unknown", "mismatch": {}}
 	var mismatch := {}
-	for k in base:
-		var b: Variant = base[k]
-		if not cur.has(k):
-			continue
-		var c: Variant = cur[k]
-		if b == null or c == null or str(b).is_empty() or str(c).is_empty():
-			continue
-		if str(b) != str(c):
-			mismatch[k] = [b, c]
+	if has_base:
+		for k in base:
+			if str(k) == "perf_clock":
+				continue
+			var b: Variant = base[k]
+			if not cur.has(k):
+				continue
+			var c: Variant = cur[k]
+			if b == null or c == null or str(b).is_empty() or str(c).is_empty():
+				continue
+			if str(b) != str(c):
+				mismatch[k] = [b, c]
+	if not (b_clock.is_empty() and c_clock.is_empty()):
+		var bc := "1" if b_clock.is_empty() else b_clock
+		var cc := "1" if c_clock.is_empty() else c_clock
+		if bc != cc:
+			mismatch["perf_clock"] = [bc, cc]
 	return {"comparable": mismatch.is_empty(), "mismatch": mismatch}
+
+
+static func _clock_of(fp: Variant) -> String:
+	if not (fp is Dictionary):
+		return ""
+	var v: Variant = (fp as Dictionary).get("perf_clock", null)
+	return "" if v == null else str(v)
 
 
 static func comparability_note(cmp: Dictionary) -> String:
@@ -443,8 +463,15 @@ static func comparability_note(cmp: Dictionary) -> String:
 		for k in mm:
 			var pair: Array = mm[k] if mm[k] is Array else [mm[k], ""]
 			parts.append("%s %s -> %s" % [str(k), str(pair[0]), str(pair[1]) if pair.size() > 1 else ""])
-		return ("PERF BASELINE NOT COMPARABLE: the baseline was measured on another setup (%s), so perf_diff compares unlike numbers."
-			+ " Run once with save_baseline=true on this setup to replace it. Absolute perf asserts are not affected.") % ", ".join(parts)
+		var clock: Array = mm.get("perf_clock", []) if mm.get("perf_clock", []) is Array else []
+		if clock.size() == 2 and int(str(clock[1])) < int(str(clock[0])):
+			# The baseline is newer than the game's runtime: re-capturing would only store the old clock's numbers.
+			return ("PERF BASELINE NOT COMPARABLE: the baseline was timed by a newer perf clock than the running game's (%s): the game still runs a runtime older than Beckett 1.17."
+				+ " Restart the game so it loads the current runtime, then run again. Absolute perf asserts are not affected.") % ", ".join(parts)
+		var why := "the baseline was measured on another setup (%s), so perf_diff compares unlike numbers." % ", ".join(parts)
+		if clock.size() == 2:
+			why += " perf_clock 1 is the once-a-second Performance.TIME_PROCESS reading Beckett used before 1.17, and 1.17 times every frame, so the old baseline is another measurement."
+		return ("PERF BASELINE NOT COMPARABLE: %s Run once with save_baseline=true on this setup to replace it. Absolute perf asserts are not affected.") % why
 	return ("PERF BASELINE UNVERIFIED: the stored baseline has no fingerprint (saved before 1.16), so nothing says it was measured on this setup."
 		+ " Run once with save_baseline=true to stamp it. Absolute perf asserts are not affected.")
 
@@ -726,10 +753,13 @@ func _pump() -> Callable:
 
 
 ## Block (pumping the bridge) until `status_cmd` reports the window closed: {reply} | {timeout, reply} | {error, reply}.
+## A poll the game answers late (a busy frame: the bridge's timeout) is "not yet", not the end of the window (1.17).
 func _poll_status(status_cmd: Dictionary, done: Callable, timeout_ms: int, interval_ms: int = 50) -> Dictionary:
 	var last := {"reply": {}}
 	var tick := func() -> Dictionary:
 		var r := _cmd(status_cmd, 2000)
+		if not _ok(r) and CallArgs.to_bool(r.get("timeout", false)):
+			return {}
 		last["reply"] = r
 		if not _ok(r):
 			return {"error": _err_of(r, str(status_cmd.get("cmd", "status")))}
@@ -1337,7 +1367,7 @@ static func _fingerprint_from(side: Dictionary, doc: Dictionary) -> Dictionary:
 		"viewport": "%dx%d" % [int(ProjectSettings.get_setting("display/window/size/viewport_width", 0)), int(ProjectSettings.get_setting("display/window/size/viewport_height", 0))],
 		"suite": suite_hash(doc),
 	}
-	for k in ["gpu", "gpu_vendor", "display", "rendering_driver", "build"]:
+	for k in ["gpu", "gpu_vendor", "display", "rendering_driver", "build", "perf_clock"]:
 		if side.has(k) and side[k] != null:
 			out[k] = str(side[k])
 	return out
@@ -1425,30 +1455,13 @@ func _run_doc(doc: Dictionary, args: Dictionary, opts: Dictionary) -> Dictionary
 	if mode != "deterministic" and CallArgs.to_bool(opts.get("unfreeze_first", false)):
 		_cmd({"cmd": "tc_unfreeze"}, 2000)
 	if mode == "deterministic":
-		var open_cmd := {"cmd": "replay_open", "events": events, "settle_frames": settle}
-		if not rules.is_empty():
-			open_cmd["invariants"] = rules
-		var o := _cmd(open_cmd)
-		if not _ok(o):
-			return {"error": _fail_text("replay_open", _err_of(o, "replay_open"))}
-		var last_f := 0
-		for e in events:
-			if e is Dictionary:
-				last_f = maxi(last_f, _int_of((e as Dictionary).get("f", 0), 0))
-		var cap := clampi(int(float(last_f + settle) * 2000.0 / float(_tps())) + 5000, 2000, 300000)
-		var w := _poll_status({"cmd": "replay_status"}, func(s: Dictionary) -> bool: return not CallArgs.to_bool(s.get("replaying", true)), cap)
-		if w.has("error"):
-			return {"error": _fail_text("replay_status", str(w["error"]))}
-		var st: Dictionary = (w["reply"] as Dictionary).duplicate()
-		st.erase("ok")
-		st.erase("_id")
-		if w.has("timeout"):
-			return {"error": "the replay window was still open after %d ms (%d of %d events injected): the game is not stepping (runtime timeout of the window)" % [cap, _int_of(st.get("injected", 0), 0), _int_of(st.get("total_events", events.size()), events.size())]}
-		perf = st.get("perf", {}) if st.get("perf", {}) is Dictionary else {}
-		if st.has("invariants"):
-			game_inv = st["invariants"]
-			st.erase("invariants")
-		R["replay"] = st
+		var rw := _replay_window(events, settle, rules)
+		if rw.has("error"):
+			return {"error": str(rw["error"])}
+		perf = rw["perf"]
+		if rw.has("invariants"):
+			game_inv = rw["invariants"]
+		R["replay"] = rw["replay"]
 	elif mode == "plain":
 		var dispatched := 0
 		var batches := _plain_batches(events)
@@ -1580,6 +1593,79 @@ func _run_doc(doc: Dictionary, args: Dictionary, opts: Dictionary) -> Dictionary
 	if not notes.is_empty():
 		R["note"] = " ".join(PackedStringArray(notes))
 	return {"json": R}
+
+
+## The deterministic replay window of op=run: open it on the game's tick clock and wait for it to close.
+## {mode: "deterministic", replay, perf[, invariants]} or {error}. A window the game ended before its last frame (it
+## paused the tree itself, or a freeze or a restart cut it short) is an error at once, with the game's reason: no assert
+## may read a run that did not happen.
+func _replay_window(events: Array, settle: int, rules: Array = []) -> Dictionary:
+	var open_cmd := {"cmd": "replay_open", "events": events, "settle_frames": settle}
+	if not rules.is_empty():
+		open_cmd["invariants"] = rules
+	var o := _cmd(open_cmd)
+	if not _ok(o):
+		return {"error": _fail_text("replay_open", _err_of(o, "replay_open"))}
+	var last_f := 0
+	for e in events:
+		if e is Dictionary:
+			last_f = maxi(last_f, _int_of((e as Dictionary).get("f", 0), 0))
+	var end_frame := _int_of(o.get("end_frame", last_f + settle), last_f + settle)
+	var cap := clampi(int(float(end_frame) * 2000.0 / float(_tps())) + 5000, 2000, 300000)
+	var st := _replay_poll(cap, events.size(), end_frame)
+	if st.has("error"):
+		return st
+	var term := str(st.get("terminator", ""))
+	if not term.is_empty() and term != "done":
+		var why := str(st.get("note", ""))
+		if why.is_empty():
+			why = "%s after %d frame(s)" % [term, _int_of(st.get("frames", 0), 0)]
+		return {"error": ("replay stopped: %s" % why).left(BREAK_REASON_CAP)}
+	var out := {"mode": "deterministic", "perf": st.get("perf", {}) if st.get("perf", {}) is Dictionary else {}}
+	if st.has("invariants"):
+		out["invariants"] = st["invariants"]
+		st.erase("invariants")
+	out["replay"] = st
+	return out
+
+
+## Poll replay_status until the window has closed: the closing status (minus the transport fields) or {error}. A poll
+## the game answers late is "not yet"; a debugger pause or any other refusal ends the wait at once. When `cap_ms` runs
+## out, a window whose frame count still moves gets another cap_ms (a game that renders below its physics rate replays
+## in slow motion); one that stopped moving is an error that says how far it got.
+func _replay_poll(cap_ms: int, total_events: int, end_frames: int) -> Dictionary:
+	var t0 := Time.get_ticks_msec()
+	var last := {}
+	var mark := -1
+	var deadline := t0 + cap_ms
+	while true:
+		var r := _cmd({"cmd": "replay_status"}, 2000)
+		if _ok(r):
+			if last.is_empty():
+				mark = _int_of(r.get("frames", 0), 0)
+			last = r
+			if not CallArgs.to_bool(r.get("replaying", true)):
+				break
+		elif not CallArgs.to_bool(r.get("timeout", false)):
+			return {"error": _fail_text("replay_status", _err_of(r, "replay_status"))}
+		if Time.get_ticks_msec() >= deadline:
+			if last.is_empty():
+				return {"error": "the game answered no replay_status poll within %d ms (%d event(s), %d frames planned): it is too busy to answer, or not stepping; time_control op=freeze ends the window" % [cap_ms, total_events, end_frames]}
+			var f := _int_of(last.get("frames", 0), 0)
+			if f == mark:
+				return {"error": "replay window did not close within %d ms: the game stopped stepping (it had run %d of %d frames)" % [Time.get_ticks_msec() - t0, f, end_frames]}
+			mark = f
+			deadline = Time.get_ticks_msec() + cap_ms
+		_hold(20)
+	var out := last.duplicate()
+	out.erase("ok")
+	out.erase("_id")
+	return out
+
+
+## A steps suite run on its own (op=run's steps mode): the flow, then the verdict. {json} or {error}.
+func _run_steps(name: String, args: Dictionary, steps: Array, rules: Array) -> Dictionary:
+	return _run_doc({"name": name, "steps": steps, "invariants": rules}, args, {"name": name})
 
 
 ## Plain events grouped by their recorded time t (ms): [[t, [events]], ...]; events without t go together.

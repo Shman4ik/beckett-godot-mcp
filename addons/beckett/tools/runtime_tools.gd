@@ -25,6 +25,7 @@ var server  # mcp_server node (exposes .bridge)
 const MCPJobsScript := preload("res://addons/beckett/core/jobs.gd")  # poll_until
 const CallArgs := preload("res://addons/beckett/core/callargs.gd")  # flags arrive as text from lenient clients
 const PathGuard := preload("res://addons/beckett/core/path_guard.gd")  # recordings and shaders are paths the caller names
+const RuntimeBridge := preload("res://addons/beckett/core/runtime_bridge.gd")  # with_kind: what a command with no answer may still do (1.17)
 
 const NOT_RUNNING := "game not running (no runtime connection). Call play_scene first, then wait_until condition=game_connected."
 
@@ -255,11 +256,14 @@ func _connected() -> bool:
 
 
 ## Send one command: the raw reply when the game answered ok, else an {error[, suggestion]}
-## handler result (check with _is_error).
-func _send(cmd: Dictionary, timeout_ms: int = 4000) -> Dictionary:
+## handler result (check with _is_error). With a `kind` (RuntimeBridge.KIND_*), an answer that never came says what
+## the command may still do (RuntimeBridge.with_kind).
+func _send(cmd: Dictionary, timeout_ms: int = 4000, kind: String = "") -> Dictionary:
 	if not _connected():
 		return {"error": NOT_RUNNING}
 	var r: Dictionary = server.bridge.send_command(cmd, timeout_ms)
+	if not kind.is_empty():
+		r = RuntimeBridge.with_kind(r, kind)
 	if not bool(r.get("ok", false)):
 		var out := {"error": str(r.get("error", "%s failed" % str(cmd.get("cmd", "command"))))}
 		if r.has("suggestion") and str(r["suggestion"]) != "":
@@ -281,20 +285,29 @@ static func _as_json(r: Dictionary) -> Dictionary:
 
 
 ## Block the editor (pumping the bridge) until `status_cmd` reports the window closed.
-## `done` decides from a status reply; returns {"reply": last} or {"timeout": true, "reply": last}.
+## `done` decides from a status reply; returns {"reply": last} or {"timeout": true, "reply": last}, with "mute" when
+## the game answered no poll at all. A poll the game answers late (a busy frame: the bridge's timeout) is "not yet",
+## not the end of the window (1.17); any other refusal (a debugger pause, a lost game) ends the wait at once.
 func _poll_window(status_cmd: Dictionary, done: Callable, timeout_ms: int, interval_ms: int = 50) -> Dictionary:
-	var last := {"reply": {}}
+	var last := {"reply": {}, "answered": false}
 	var tick := func() -> Dictionary:
 		var r: Dictionary = server.bridge.send_command(status_cmd, 2000)
-		last["reply"] = r
 		if not bool(r.get("ok", false)):
+			if bool(r.get("timeout", false)):
+				return {}
+			last["reply"] = r
 			return {"error": str(r.get("error", "status poll failed"))}
+		last["reply"] = r
+		last["answered"] = true
 		return {"done": true} if bool(done.call(r)) else {}
 	var res: Dictionary = MCPJobsScript.poll_until(timeout_ms, interval_ms, tick, Callable(server.bridge, "poll_once"))
 	if res.has("error"):
 		return {"error": res["error"], "reply": last["reply"]}
 	if res.has("timeout"):
-		return {"timeout": true, "reply": last["reply"]}
+		var out := {"timeout": true, "reply": last["reply"]}
+		if not bool(last["answered"]):
+			out["mute"] = true
+		return out
 	return {"reply": last["reply"]}
 
 
@@ -514,13 +527,20 @@ func _type_text(args: Dictionary) -> Dictionary:
 	var w := _poll_window({"cmd": "type_status"}, func(s: Dictionary) -> bool: return bool(s.get("done", false)), timeout, 30)
 	if w.has("error"):
 		return {"error": str(w["error"])}
+	if w.has("mute"):
+		return {"error": "the game answered no status poll while typing within %d ms, so it may still be typing: read the field back (runtime_get_property text) before you type it again" % timeout}
 	var st: Dictionary = w["reply"]
-	var out := st.duplicate()
-	out.erase("ok")
-	out.erase("_id")
 	if w.has("timeout"):
-		out["warning"] = "still typing after %d ms (%d typed); poll again with a fresh type_text call or raise timeout_ms" % [timeout, int(st.get("typed", 0))]
-	return {"json": out}
+		var out := st.duplicate()
+		out.erase("ok")
+		out.erase("_id")
+		out["warning"] = "still typing after %d ms (%d typed); read the field back before you type again, or raise timeout_ms" % [timeout, int(st.get("typed", 0))]
+		return {"json": out}
+	var where := str(st.get("path", r.get("path", "the focused control")))
+	var text := "typed %d char(s) into %s frame-by-frame" % [int(st.get("typed", 0)), where]
+	if st.has("text_after"):
+		text += "; it now reads %s" % JSON.stringify(str(st["text_after"]))
+	return {"text": text}
 
 
 ## Godot 4.4+ LineEdit has an edit mode separate from focus: after text_submitted it keeps
@@ -555,13 +575,18 @@ func _ui_do(args: Dictionary) -> Dictionary:
 	var step_to: int = maxi(100, int(args.get("step_timeout_ms", 5000)))
 	var default_total: int = (steps as Array).size() * step_to + 5000
 	var timeout: int = clampi(int(args.get("timeout_ms", default_total)), 500, 120000)
-	var w := _poll_window({"cmd": "ui_do_status"}, func(s: Dictionary) -> bool: return not bool(s.get("active", true)), timeout)
+	var w := _poll_window({"cmd": "ui_do_status"}, func(s: Dictionary) -> bool: return bool(s.get("done", not bool(s.get("active", true)))), timeout)
 	if w.has("error"):
 		return {"error": str(w["error"])}
+	if w.has("mute"):
+		server.bridge.send_command({"cmd": "ui_do_abort"}, 2000)
+		return {"error": "the game answered no status poll while the flow ran within %d ms, so the flow may have run on: it was asked to abort; read the state back before you run it again" % timeout}
 	var st: Dictionary = w["reply"]
 	var out := st.duplicate()
 	out.erase("ok")
 	out.erase("_id")
+	if out.get("results") is Array and not out.has("completed"):
+		out["completed"] = (out["results"] as Array).size()
 	if w.has("timeout"):
 		server.bridge.send_command({"cmd": "ui_do_abort"}, 2000)
 		out["aborted"] = true
@@ -648,6 +673,8 @@ func _replay_input(args: Dictionary) -> Dictionary:
 			return {"error": "%s is not a recording (expected {events:[...]} or a JSON array)" % path}
 	if not (events is Array):
 		return {"error": "give events=[...] or path= a record_input JSON"}
+	if not _framed(events):
+		return PathGuard.noted(_replay_plain(events), guard)
 	var cmd := {"cmd": "replay_open", "events": events}
 	for k in ["settle_frames", "invariants"]:
 		if args.has(k):
@@ -659,6 +686,8 @@ func _replay_input(args: Dictionary) -> Dictionary:
 	var w := _poll_window({"cmd": "replay_status"}, func(s: Dictionary) -> bool: return not bool(s.get("replaying", true)), timeout)
 	if w.has("error"):
 		return {"error": str(w["error"])}
+	if w.has("mute"):
+		return {"error": "the game answered no replay_status poll within %d ms, so the replay may still be running: time_control op=status shows where the game stands, op=freeze ends it" % timeout}
 	var st: Dictionary = w["reply"]
 	var out := st.duplicate()
 	out.erase("ok")
@@ -672,6 +701,45 @@ func _replay_input(args: Dictionary) -> Dictionary:
 	else:
 		out["note"] = "the game is frozen where the replay ended; time_control op=unfreeze resumes it"
 	return PathGuard.noted({"json": out}, guard)
+
+
+## Does any event carry a frame stamp f (a record_input recording)? Without one there is no frame to replay it on.
+static func _framed(events: Array) -> bool:
+	for e in events:
+		if e is Dictionary and (e as Dictionary).has("f"):
+			return true
+	return false
+
+
+## Events with no frame stamp go to the game one by one, in real time (their t gaps, in ms, held between them). An
+## event with no answer ends the replay: the game may still run it, so what was not sent after it is said, and it is
+## not counted as replayed.
+func _replay_plain(events: Array) -> Dictionary:
+	if not _connected():
+		return {"error": NOT_RUNNING}
+	var n := events.size()
+	var sent := 0
+	var dispatched := 0
+	var t_prev := -1.0
+	for i in n:
+		var e: Variant = events[i]
+		if not (e is Dictionary):
+			continue
+		var t: Variant = (e as Dictionary).get("t", null)
+		if (t is int or t is float) and t_prev >= 0.0 and float(t) > t_prev:
+			_hold(mini(int(float(t) - t_prev), 60000))
+		if t is int or t is float:
+			t_prev = float(t)
+		var r: Dictionary = RuntimeBridge.with_kind(server.bridge.send_command({"cmd": "input", "events": [e]}, 4000), RuntimeBridge.KIND_CHANGE)
+		if not bool(r.get("ok", false)):
+			var why := str(r.get("error", "input failed"))
+			if bool(r.get("timeout", false)) or bool(r.get("delivered", false)):
+				return {"error": "event %d of %d got no answer, so %d event(s) after it were not sent (%d replayed before it). %s" % [i + 1, n, n - i - 1, sent, why]}
+			return {"error": "event %d of %d was refused (%d replayed before it): %s" % [i + 1, n, sent, why]}
+		sent += 1
+		dispatched += int(r.get("dispatched", 0))
+	return {"json": {"mode": "plain", "replayed": sent, "dispatched": dispatched,
+		"note": "the events carry no frame stamp (f), so they went in one by one in real time; record_input stamps them for a frame-exact replay"}}
 
 
 # ---------------------------------------------------------------- time control
@@ -690,47 +758,141 @@ func _time_control(args: Dictionary) -> Dictionary:
 				return {"error": "op=time_scale needs value (0.01..10)"}
 			return _tc_simple({"cmd": "tc_time_scale", "value": float(args["value"])})
 		"step":
-			var cmd := {"cmd": "tc_step", "frames": maxi(1, int(args.get("frames", 1)))}
-			if args.get("inputs_per_frame") is Array:
-				cmd["inputs_per_frame"] = args["inputs_per_frame"]
-			return _tc_window(cmd, 120000)
+			return _tc_step(args)
 		"step_until":
-			var cond := str(args.get("condition", "")).strip_edges()
-			if cond.is_empty():
-				return {"error": "op=step_until needs condition (a GDScript expression)"}
-			var tsec: float = clampf(float(args.get("timeout_sec", 10.0)), 0.1, 120.0)
-			var cmd2 := {"cmd": "tc_step_until", "condition": cond, "timeout_sec": tsec, "max_frames": maxi(0, int(args.get("max_frames", 0)))}
-			return _tc_window(cmd2, int(tsec * 1000.0) + 5000)
+			return _tc_step_until(args)
 	return {"error": "unknown op '%s'" % op, "suggestion": "freeze | unfreeze | step | step_until | time_scale | status"}
 
 
 func _tc_simple(cmd: Dictionary) -> Dictionary:
-	var r := _send(cmd)
+	var kind := RuntimeBridge.KIND_READ if str(cmd.get("cmd", "")) == "tc_status" else RuntimeBridge.KIND_CHANGE
+	var r := _send(cmd, 4000, kind)
 	if _is_error(r):
 		return r
 	return _as_json(r)
 
 
-func _tc_window(cmd: Dictionary, timeout_ms: int) -> Dictionary:
-	var r := _send(cmd)
+## How long op=step waits for its window before it looks at whether the game still moves: the frames plus 8 ticks at
+## the physics rate (a rate of 0 counts as one tick a second), plus 1.5 s, and never under 2 s.
+static func step_poll_cap_ms(frames: int, ticks_per_second: int) -> int:
+	var rate := float(ticks_per_second) if ticks_per_second > 0 else 1.0
+	return maxi(2000, int(1000.0 * float(frames + 8) / rate) + 1500)
+
+
+## time_control op=step: open a window of `frames` ticks on the game's tick clock and wait for it to close. The reply
+## is what the game counted: frames_stepped, the pause, the scale, the inputs that went in, and the terminator and the
+## game's note when the window did not simply run to its end.
+func _tc_step(args: Dictionary) -> Dictionary:
+	var frames := maxi(1, int(args.get("frames", 1)))
+	var cmd := {"cmd": "tc_step", "frames": frames, "unfreeze": CallArgs.flag(args, "unfreeze")}
+	if args.get("inputs_per_frame") is Array:
+		cmd["inputs_per_frame"] = args["inputs_per_frame"]
+	var r := _send(cmd, 4000, RuntimeBridge.KIND_CHANGE)
 	if _is_error(r):
 		return r
+	var requested := int(r.get("frames_requested", frames))
+	var tps := int(ProjectSettings.get_setting("physics/common/physics_ticks_per_second", 60))
+	var st := _tc_poll_window(step_poll_cap_ms(requested, tps))
+	if st.has("error"):
+		return {"error": str(st["error"])}
+	var out := {"op": "step", "frames_requested": requested, "frames_stepped": int(st.get("frames", 0)),
+		"paused": st.get("paused", false), "time_scale": st.get("time_scale", 1.0)}
+	if st.has("inputs_injected"):
+		out["inputs_injected"] = st["inputs_injected"]
+	var term := str(st.get("terminator", ""))
+	if not term.is_empty() and term != "done":
+		out["terminator"] = term
+	var note := _tc_notes(r, st)
+	if not note.is_empty():
+		out["note"] = note
+	if bool(st.get("in_step", false)):
+		out["warning"] = _tc_still_open(int(st.get("frames", 0)))
+	return {"json": out}
+
+
+## time_control op=step_until: open a condition window and wait for it to close (the condition, max_frames or the
+## timeout ends it). Already true: the game answered at once with frames 0, and nothing is polled.
+func _tc_step_until(args: Dictionary) -> Dictionary:
+	var cond := str(args.get("condition", "")).strip_edges()
+	if cond.is_empty():
+		return {"error": "op=step_until needs condition (a GDScript expression)"}
+	var tsec: float = clampf(float(args.get("timeout_sec", 10.0)), 0.1, 120.0)
+	var cmd := {"cmd": "tc_step_until", "condition": cond, "timeout_sec": tsec, "max_frames": maxi(0, int(args.get("max_frames", 0))),
+		"unfreeze": CallArgs.flag(args, "unfreeze")}
+	var r := _send(cmd, 4000, RuntimeBridge.KIND_CHANGE)
+	if _is_error(r):
+		return r
+	var out := {"op": "step_until"}
 	if not bool(r.get("started", false)):
-		return _as_json(r)  # step_until whose condition was already true: closed with 0 frames
-	var w := _poll_window({"cmd": "tc_step_status"}, func(s: Dictionary) -> bool: return not bool(s.get("in_step", true)), timeout_ms, 20)
-	if w.has("error"):
-		return {"error": str(w["error"])}
-	var st: Dictionary = w["reply"]
-	var out := st.duplicate()
+		out["terminator"] = str(r.get("terminator", "condition"))
+		out["immediate"] = bool(r.get("immediate", true))
+		out["frames"] = int(r.get("frames", 0))
+		out["condition_value"] = r.get("condition_value")
+		out["paused"] = r.get("paused", true)
+		if r.has("note"):
+			out["note"] = r["note"]
+		return {"json": out}
+	var st := _tc_poll_window(int(tsec * 1000.0) + 2000)
+	if st.has("error"):
+		return {"error": str(st["error"])}
+	out["terminator"] = str(st.get("terminator", ""))
+	out["frames"] = int(st.get("frames", 0))
+	out["condition_value"] = st.get("condition_value")
+	out["paused"] = st.get("paused", false)
+	var note := _tc_notes(r, st)
+	if not note.is_empty():
+		out["note"] = note
+	if bool(st.get("in_step", false)):
+		out.erase("terminator")
+		out["warning"] = _tc_still_open(int(st.get("frames", 0)))
+	return {"json": out}
+
+
+## Poll tc_step_status until the window has closed: the closing status, or the last one while it is still open (then
+## in_step is true). A poll the game answers late (a busy frame) is "not yet", not the end; a game paused in the
+## debugger, or any other refusal, ends the wait at once. When `cap_ms` runs out, a window whose frame count still
+## moves gets another cap_ms (a game with slow frames runs one tick per engine frame); one that stopped is reported.
+func _tc_poll_window(cap_ms: int) -> Dictionary:
+	var last := {}
+	var mark := -1
+	var deadline := Time.get_ticks_msec() + cap_ms
+	while true:
+		var r: Dictionary = server.bridge.send_command({"cmd": "tc_step_status"}, 2000)
+		if bool(r.get("ok", false)):
+			if last.is_empty():
+				mark = int(r.get("frames", 0))
+			last = r
+			if not bool(r.get("in_step", true)):
+				break
+		elif not bool(r.get("timeout", false)):
+			return {"error": str(r.get("error", "tc_step_status failed"))}
+		if Time.get_ticks_msec() >= deadline:
+			if last.is_empty():
+				return {"error": "the game answered no status poll while stepping within %d ms, so the step may still be running: time_control op=status shows where it stands, op=freeze ends it" % cap_ms}
+			var f := int(last.get("frames", 0))
+			if f == mark:
+				break
+			mark = f
+			deadline = Time.get_ticks_msec() + cap_ms
+		_hold(20)
+	var out := last.duplicate()
 	out.erase("ok")
 	out.erase("_id")
-	if r.has("note"):
-		out["note"] = r["note"]
-	if str(cmd.get("cmd", "")) == "tc_step_until":
-		out.erase("inputs_injected")  # the runtime does not reset this counter for step_until: it is the last step's
-	if w.has("timeout"):
-		out["warning"] = "the step window was still open after %d ms; time_control op=freeze closes it" % timeout_ms
-	return {"json": out}
+	return out
+
+
+## The open reply's note and the closing status's note, in that order.
+static func _tc_notes(opened: Dictionary, st: Dictionary) -> String:
+	var parts := PackedStringArray()
+	for d in [opened, st]:
+		var n := str((d as Dictionary).get("note", ""))
+		if not n.is_empty():
+			parts.append(n)
+	return "; ".join(parts)
+
+
+static func _tc_still_open(frames: int) -> String:
+	return "the step window is still open after %d tick(s) and its frame count stopped moving (the game may be suspended or very slow): time_control op=status shows it, op=freeze closes it" % frames
 
 
 # ---------------------------------------------------------------- live writes
@@ -758,7 +920,7 @@ func _runtime_call(args: Dictionary) -> Dictionary:
 func _runtime_set(args: Dictionary) -> Dictionary:
 	var cmd := {"cmd": "set", "prop": str(args.get("property", "")), "value": args.get("value")}
 	_add_target(cmd, args)
-	var r := _send(cmd)
+	var r := _send(cmd, 4000, RuntimeBridge.KIND_CHANGE)
 	if _is_error(r):
 		return r
 	return _as_json(r)
