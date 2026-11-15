@@ -427,9 +427,10 @@ func _eval_node_state(d: Dictionary) -> Dictionary:
 	if not (first in n):
 		return {"type": "node_state", "status": "fail", "detail": ("%s: %s has no property '%s'" % [subject, n.get_class(), first]).left(DETAIL_CAP)}
 	var v: Variant = n.get_indexed(NodePath(prop))
+	var shown := str(TypedJson.render(v))  # the value as a read returns it (a vector [0, 6, 11]), as the editor's run words it
 	if _values_equal(v, d["equals"]):
-		return {"type": "node_state", "status": "pass", "detail": ("%s == %s" % [subject, str(v)]).left(DETAIL_CAP)}
-	return {"type": "node_state", "status": "fail", "detail": ("%s = %s (expected %s)" % [subject, str(v), str(d["equals"])]).left(DETAIL_CAP)}
+		return {"type": "node_state", "status": "pass", "detail": ("%s == %s" % [subject, shown]).left(DETAIL_CAP)}
+	return {"type": "node_state", "status": "fail", "detail": ("%s = %s (expected %s)" % [subject, shown, str(d["equals"])]).left(DETAIL_CAP)}
 
 
 func _eval_expr(d: Dictionary) -> Dictionary:
@@ -745,27 +746,13 @@ static func _vec2(v: Variant) -> Vector2:
 
 # ---------------------------------------------------------------- small helpers
 
-## Numeric-tolerant equality (playtest_tools._values_equal): JSON numbers are floats, so 3 equals 3.0.
+const TypedJson := preload("res://addons/beckett/core/typed_json.gd")  # same(): the one node_state rule (1.17)
+
+
+## node_state's equality: TypedJson.same, the editor's rule (playtest_tools._values_equal), so a suite gets one verdict
+## wherever it runs: 12 matches 12.0 but not 123457 for 123456, and a live Vector3 matches [0, 6, 11] or "0 6 11".
 func _values_equal(a: Variant, b: Variant) -> bool:
-	if (a is int or a is float) and (b is int or b is float):
-		return is_equal_approx(float(a), float(b))
-	if a is bool or b is bool:
-		return str(a).to_lower() == str(b).to_lower()
-	if a is Array and b is Array:
-		if (a as Array).size() != (b as Array).size():
-			return false
-		for i in (a as Array).size():
-			if not _values_equal(a[i], b[i]):
-				return false
-		return true
-	if a is Dictionary and b is Dictionary:
-		if (a as Dictionary).size() != (b as Dictionary).size():
-			return false
-		for k in a:
-			if not (b as Dictionary).has(k) or not _values_equal(a[k], b[k]):
-				return false
-		return true
-	return str(a) == str(b)
+	return TypedJson.same(a, b)
 
 
 static func _num(v: Variant) -> Variant:

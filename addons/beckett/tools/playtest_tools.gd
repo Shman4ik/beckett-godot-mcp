@@ -65,8 +65,7 @@ const PERF_METRICS := ["frames", "frame_ms_min", "frame_ms_avg", "frame_ms_p95",
 const OVERLAP_KEYS := ["paths", "group", "min_depth", "max_pairs", "max_bodies", "budget_ms"]
 
 const NOT_CONNECTED := "game not running/connected: call play_scene, then wait_until condition=game_connected, then playtest op=%s"
-const RESET_TEXT := ("the scene was restarted before every run (scene_reload: a fresh instance from its file, its resources read again,"
-	+ " held input released). NOT reset: autoloads, saved files, engine singletons and static variables, so a suite that depends on them"
+const RESET_NOT := (" NOT reset: autoloads, saved files, engine singletons and static variables, so a suite that depends on them"
 	+ " carries their state from run to run")
 
 ## ms budget of one op=repeat call: a run that would not fit is not started (the batch is truncated).
@@ -78,6 +77,24 @@ var restart_cap_ms: int = 5000
 var changed_files_fn: Callable = Callable()
 
 var server  # mcp_server node; only .bridge is used
+
+
+## What op=repeat's restart (the runtime's scene_reload) resets, in the words its reply carries. `deep`: the engine has
+## the deep reload (CACHE_MODE_REPLACE_DEEP, Godot 4.3+), so the resource files the scene names are read again too; on
+## 4.2 they come from the cache, and a change a run made to one carries into the next run (MCPRuntime.deep_replace_mode).
+static func reset_text(deep: bool) -> String:
+	if deep:
+		return ("the scene was restarted before every run (scene_reload: a fresh instance from its file, its resources (the .tres"
+			+ " files it names) re-read from disk, held input released)." + RESET_NOT)
+	return ("the scene was restarted before every run (scene_reload: a fresh instance from its file, held input released), but the"
+		+ " resource files it names (.tres) come from the cache on this Godot (no deep reload before 4.3), so a change a run made to"
+		+ " one carries into the next run." + RESET_NOT)
+
+
+## Does this engine have the deep reload the restart uses? Looked up by name, as the runtime does: a constant named in
+## code would stop this script from parsing on 4.2.
+static func _deep_reload() -> bool:
+	return ClassDB.class_has_integer_constant("ResourceLoader", "CACHE_MODE_REPLACE_DEEP")
 
 
 func _register(registry) -> void:
@@ -650,26 +667,14 @@ static func _fail_text(what: String, err: String) -> String:
 	return ("%s failed: %s" % [what, err]).left(BREAK_REASON_CAP)
 
 
+const TypedJson := preload("res://addons/beckett/core/typed_json.gd")  # same(): the one node_state rule (1.17)
+
+
+## node_state's equality: TypedJson.same, the rule the runner, the exported test, ui_do and assert_node_state judge by
+## too (1.17). 12 matches the 12.0 JSON makes of it but not 123457 for 123456, and a vector read as [0, 6, 11] matches
+## "0 6 11", "Vector3(0, 6, 11)", {x, y, z} and the "(0.0, 6.0, 11.0)" a game from before 1.17 sent.
 func _values_equal(a: Variant, b: Variant) -> bool:
-	if (a is int or a is float) and (b is int or b is float):
-		return is_equal_approx(float(a), float(b))
-	if a is bool or b is bool:
-		return str(a).to_lower() == str(b).to_lower()
-	if a is Array and b is Array:
-		if (a as Array).size() != (b as Array).size():
-			return false
-		for i in (a as Array).size():
-			if not _values_equal(a[i], b[i]):
-				return false
-		return true
-	if a is Dictionary and b is Dictionary:
-		if (a as Dictionary).size() != (b as Dictionary).size():
-			return false
-		for k in a:
-			if not (b as Dictionary).has(k) or not _values_equal(a[k], b[k]):
-				return false
-		return true
-	return str(a) == str(b)
+	return TypedJson.same(a, b)
 
 
 ## A suite name as a file stem: no folders, no .json, only letters, digits, _ and -.
@@ -1755,7 +1760,7 @@ func _repeat(args: Dictionary) -> Dictionary:
 	var agg := aggregate(runs)
 	var out := {"name": name, "runs": agg["runs"], "requested": n, "passes": agg["passes"], "fails": agg["fails"], "blocked": agg["blocked"],
 		"pass_rate": agg["pass_rate"], "verdict": verdict_of(int(agg["fails"]), int(agg["blocked"])), "outcomes": agg["outcomes"],
-		"steps": agg["steps"], "flaky_steps": agg["flaky_steps"], "first_divergence": agg["first_divergence"], "mode": mode, "reset": RESET_TEXT}
+		"steps": agg["steps"], "flaky_steps": agg["flaky_steps"], "first_divergence": agg["first_divergence"], "mode": mode, "reset": reset_text(_deep_reload())}
 	out["pass_all"] = not truncated and aborted.is_empty() and int(agg["runs"]) == n and int(agg["passes"]) == n
 	if not (agg["flaky_blocked"] as Array).is_empty():
 		out["flaky_blocked"] = agg["flaky_blocked"]

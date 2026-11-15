@@ -588,7 +588,7 @@ func _try_assert(a: Dictionary) -> Dictionary:
 		_evaluated = true
 		if _step_equal(actual, a.get("equals")):
 			return {"ok": true, "detail": "%s.%s == %s" % [str(a["node"]), str(a["property"]), str(a.get("equals"))]}
-		_last_wait = "%s.%s = %s (want %s)" % [str(a["node"]), str(a["property"]), str(actual), str(a.get("equals"))]
+		_last_wait = "%s.%s = %s (want %s)" % [str(a["node"]), str(a["property"]), str(render_value(actual)), str(a.get("equals"))]
 		return {}
 	return {"ok": false, "status": "fail", "error": "assert needs condition, or node+property+equals"}
 
@@ -685,11 +685,9 @@ func _try_inject(spec: Dictionary) -> Dictionary:
 	return {}
 
 
-## Numeric-tolerant equality of a step's assert (ui_do's rule): JSON numbers are floats.
+## A step's assert node/property/equals (ui_do's rule): same_value, the one node_state rule.
 static func _step_equal(actual: Variant, expected: Variant) -> bool:
-	if (actual is int or actual is float) and (expected is int or expected is float):
-		return is_equal_approx(float(actual), float(expected))
-	return str(actual) == str(expected)
+	return same_value(actual, expected)
 
 
 ## How long the stepping of an inject may take, in ms (ui_do.inject_budget_ms).
@@ -764,10 +762,11 @@ static func _eval_node_state(d: Dictionary, scene: Node) -> Dictionary:
 	var res := _property_owner(n, prop)
 	if not bool(res.get("ok", false)):
 		return {"type": "node_state", "status": "fail", "detail": ("%s: %s" % [subject, str(res.get("error", "get failed"))]).left(DETAIL_CAP)}
-	var v: Variant = _safe(_read_at(res))
-	if _values_equal(v, d["equals"]):
-		return {"type": "node_state", "status": "pass", "detail": "%s == %s" % [subject, str(v)]}
-	return {"type": "node_state", "status": "fail", "detail": ("%s = %s (expected %s)" % [subject, str(v), str(d["equals"])]).left(DETAIL_CAP)}
+	var v: Variant = _read_at(res)  # live, typed: rendered for the words and for the compare, as a read returns it
+	var shown := str(render_value(v))  # as the editor's run words it: the value as a read returns it, a vector [0, 6, 11]
+	if same_value(v, d["equals"]):
+		return {"type": "node_state", "status": "pass", "detail": "%s == %s" % [subject, shown]}
+	return {"type": "node_state", "status": "fail", "detail": ("%s = %s (expected %s)" % [subject, shown, str(d["equals"])]).left(DETAIL_CAP)}
 
 
 static func _eval_expr(d: Dictionary, scene: Node) -> Dictionary:
@@ -810,27 +809,220 @@ static func _find_text(node: Node, text: String, found: Array) -> void:
 		_find_text(c, text, found)
 
 
-## playtest's equality for node_state: numbers by value, bools by text, arrays and dictionaries entry by entry.
-static func _values_equal(a: Variant, b: Variant) -> bool:
-	if (a is int or a is float) and (b is int or b is float):
-		return is_equal_approx(float(a), float(b))
-	if a is bool or b is bool:
-		return str(a).to_lower() == str(b).to_lower()
-	if a is Array and b is Array:
-		if (a as Array).size() != (b as Array).size():
-			return false
+## The types whose Godot literal same_value reads as that type (TypedJson.LITERAL_TYPES).
+const TV_LITERAL_TYPES := ["Vector2", "Vector2i", "Vector3", "Vector3i", "Vector4", "Vector4i", "Quaternion", "Rect2", "Rect2i",
+	"Transform2D", "Basis", "Transform3D", "Projection", "AABB", "Plane"]
+## The labels str() writes inside a matrix-family value, dropped when same_value reads the numbers of such text.
+const TV_PRINT_MARKS := ["X:", "Y:", "Z:", "W:", "O:", "P:", "S:", "N:", "D:", "(", ")", "[", "]", ","]
+
+
+## A value in the shape a client reads it (core/typed_json.gd render, mirrored): an int as an int, a vector or a color
+## as an array of components, the matrix family nested, a float32 component short, nan and inf as text, an object as
+## its text. The editor's run reads values over the wire in this shape, so this test words them the same way.
+static func render_value(v: Variant) -> Variant:
+	var t := typeof(v)
+	match t:
+		TYPE_NIL, TYPE_BOOL, TYPE_INT, TYPE_STRING:
+			return v
+		TYPE_FLOAT:
+			if is_nan(v) or is_inf(v):
+				return str(v)
+			return v
+		TYPE_STRING_NAME, TYPE_NODE_PATH:
+			return str(v)
+		TYPE_VECTOR2, TYPE_VECTOR2I:
+			return [_component(v.x), _component(v.y)]
+		TYPE_VECTOR3, TYPE_VECTOR3I:
+			return [_component(v.x), _component(v.y), _component(v.z)]
+		TYPE_VECTOR4, TYPE_VECTOR4I, TYPE_QUATERNION:
+			return [_component(v.x), _component(v.y), _component(v.z), _component(v.w)]
+		TYPE_COLOR:
+			return [_component(v.r), _component(v.g), _component(v.b), _component(v.a)]
+		TYPE_RECT2, TYPE_RECT2I, TYPE_AABB:
+			return [render_value(v.position), render_value(v.size)]
+		TYPE_PLANE:
+			return [render_value(v.normal), _component(v.d)]
+		TYPE_TRANSFORM2D:
+			return [render_value(v.x), render_value(v.y), render_value(v.origin)]
+		TYPE_BASIS:
+			return [render_value(v.x), render_value(v.y), render_value(v.z)]
+		TYPE_TRANSFORM3D:
+			return [render_value(v.basis.x), render_value(v.basis.y), render_value(v.basis.z), render_value(v.origin)]
+		TYPE_PROJECTION:
+			return [render_value(v.x), render_value(v.y), render_value(v.z), render_value(v.w)]
+		TYPE_ARRAY:
+			var out: Array = []
+			for e in v:
+				out.append(render_value(e))
+			return out
+		TYPE_DICTIONARY:
+			var d := {}
+			for k in v:
+				d[str(k)] = render_value(v[k])
+			return d
+		TYPE_PACKED_FLOAT32_ARRAY:
+			var floats: Array = []
+			for e in v:
+				floats.append(_component(e))
+			return floats
+	if t >= TYPE_PACKED_BYTE_ARRAY and t < TYPE_MAX:
+		var items: Array = []
+		for e in v:
+			items.append(render_value(e))
+		return items
+	return str(v)  # an object, a Callable, a Signal, an RID
+
+
+## One component: an int when whole, else the shortest decimal that reads back as the same float32 (TypedJson.component).
+static func _component(x: Variant) -> Variant:
+	if x is int:
+		return x
+	var f := float(x)
+	if is_nan(f) or is_inf(f):
+		return str(f)
+	if f == floorf(f) and absf(f) < 9007199254740992.0:
+		return int(f)
+	return _short_float(f)
+
+
+## The shortest decimal, 6 to 9 significant digits, that reads back as the same float32 (TypedJson.short_float).
+static func _short_float(f: float) -> float:
+	if PackedFloat32Array([f])[0] != f:
+		return f
+	var magnitude := floori(log(absf(f)) / log(10.0))
+	for digits in range(6, 10):
+		var back := String.num(f, clampi(digits - 1 - magnitude, 0, 32)).to_float()
+		if PackedFloat32Array([back])[0] == f:
+			return back
+	return f
+
+
+## Does `actual` hold the value `expected` asks for? The one node_state rule (TypedJson.same, mirrored): both rendered;
+## two numbers by value (two whole numbers exactly, a fraction within is_equal_approx); arrays and dictionaries entry by
+## entry; the same text; and where the value read is a vector, a color or a matrix in some spelling, the numbers each
+## one spells, in order.
+static func same_value(actual: Variant, expected: Variant) -> bool:
+	return _tv_same(render_value(actual), render_value(expected))
+
+
+static func _tv_same(a: Variant, e: Variant) -> bool:
+	if (a is int or a is float) and (e is int or e is float):
+		if _tv_whole(a) and _tv_whole(e):
+			return int(a) == int(e)
+		return is_equal_approx(float(a), float(e))
+	if a is Array and e is Array and (a as Array).size() == (e as Array).size():
+		var items_same := true
 		for i in (a as Array).size():
-			if not _values_equal((a as Array)[i], (b as Array)[i]):
-				return false
+			if not _tv_same(a[i], e[i]):
+				items_same = false
+				break
+		if items_same:
+			return true
+	if a is Dictionary and e is Dictionary and (a as Dictionary).size() == (e as Dictionary).size():
+		var keys_same := true
+		for k in a:
+			if not (e as Dictionary).has(k) or not _tv_same(a[k], e[k]):
+				keys_same = false
+				break
+		if keys_same:
+			return true
+	if str(a) == str(e):
 		return true
-	if a is Dictionary and b is Dictionary:
-		if (a as Dictionary).size() != (b as Dictionary).size():
+	if not _tv_numbers_comparable(a, e):
+		return false
+	var an: Variant = _tv_numbers_of(a)
+	var en: Variant = _tv_numbers_of(e)
+	if an == null or en == null or (an as Array).is_empty() or (an as Array).size() != (en as Array).size():
+		return false
+	for i in (an as Array).size():
+		if not _tv_same(an[i], en[i]):
 			return false
-		for k in (a as Dictionary):
-			if not (b as Dictionary).has(k) or not _values_equal((a as Dictionary)[k], (b as Dictionary)[k]):
-				return false
-		return true
-	return str(a) == str(b)
+	return true
+
+
+## Whole and small enough that a double holds it exactly: two such numbers compare exactly (123457 is not 123456).
+static func _tv_whole(x: Variant) -> bool:
+	return x is int or (absf(x) < 9007199254740992.0 and x == floorf(x))
+
+
+## May the value read and the one asked for be judged by the numbers they spell (TypedJson.numbers_comparable)?
+static func _tv_numbers_comparable(a: Variant, e: Variant) -> bool:
+	if a is Array:
+		return e is String or e is Dictionary or (e is Array and _tv_nested(a) and not _tv_nested(e))
+	if a is String:
+		var s := (a as String).strip_edges()
+		return s.begins_with("(") or s.begins_with("[")
+	return (a is int or a is float) and e is String
+
+
+static func _tv_nested(v: Array) -> bool:
+	for x in v:
+		if x is Array:
+			return true
+	return false
+
+
+## The numbers a value spells, in order, or null (TypedJson.numbers_of).
+static func _tv_numbers_of(v: Variant) -> Variant:
+	if v is int or v is float:
+		return [v]
+	if v is String:
+		return _tv_text_numbers(v)
+	if v is Array:
+		var out: Array = []
+		for e in v:
+			var part: Variant = _tv_numbers_of(e)
+			if part == null:
+				return null
+			out.append_array(part)
+		return out
+	if v is Dictionary:
+		var d: Dictionary = v
+		for names in [["x", "y", "z", "w"], ["r", "g", "b", "a"]]:
+			if d.size() < 2 or d.size() > 4 or not d.has(names[0]):
+				continue
+			var out: Array = []
+			for i in d.size():
+				var c: Variant = d.get(names[i])
+				if not (c is int or c is float):
+					return null
+				out.append(c)
+			return out
+	return null
+
+
+## The numbers in text: a Godot literal read as its type, the way str() prints a value, or bare (TypedJson.text_numbers).
+static func _tv_text_numbers(text: String) -> Variant:
+	var s := text.strip_edges()
+	var open := s.find("(")
+	if open > 0 and s.ends_with(")"):
+		var type_name := s.left(open).strip_edges()
+		if type_name == "Color":
+			var c: Dictionary = coerce(s, TYPE_COLOR)
+			if not bool(c.get("ok", false)):
+				return null
+			return _tv_numbers_of(render_value(c.get("value")))
+		if TV_LITERAL_TYPES.has(type_name):
+			var lit: Variant = literal(s, [type_name])
+			if lit == null:
+				return null
+			return _tv_numbers_of(render_value(lit))
+		return null
+	for m in TV_PRINT_MARKS:
+		s = s.replace(m, " ")
+	var out: Array = []
+	for part in s.split(" ", false):
+		if part.is_valid_int():
+			out.append(part.to_int())
+		elif part.is_valid_float():
+			out.append(part.to_float())
+		elif part in ["inf", "-inf", "nan"]:
+			out.append(part)
+		else:
+			return null
+	if out.is_empty():
+		return null
+	return out
 
 
 ## "; read: a = 1, b = 2" from what a false expression read, "" when it read nothing.

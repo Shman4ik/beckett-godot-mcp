@@ -99,6 +99,9 @@ static func normalize(spec: Variant) -> Dictionary:
 			var s := str(e).strip_edges() if (e is String or e is StringName) else ""
 			if s.is_empty() or s.length() > PATH_CHARS:
 				return _bad("paths[%d] must be a non-empty node path of at most %d characters" % [i, PATH_CHARS])
+			var refused := subpath_refusal("paths[%d]" % i, s)
+			if not refused.is_empty():
+				return _bad(refused)
 			paths.append(s)
 		out["paths"] = paths
 	var g: Variant = d.get("group", null)
@@ -120,6 +123,25 @@ static func spec_error(spec: Variant) -> String:
 
 static func _bad(why: String) -> Dictionary:
 	return {"ok": false, "error": why}
+
+
+## Why a paths entry with a ':' is no node path, or "" for one without (or a file path). A ':' starts a property path
+## (Ground:shape is the shape property of Ground) and the engine's lookup drops it, so a scan scoped to it would judge
+## Ground. The words are the runtime's (mcp_runtime.gd subpath_refusal, a field with no property beside it), copied
+## because this module preloads nothing of the runtime: the headless runner's child projects carry it alone.
+static func subpath_refusal(field: String, value: String) -> String:
+	var colon := value.find(":")
+	if colon == -1 or value.contains("://"):
+		return ""
+	var node := value.left(colon)
+	if node.is_empty():
+		node = "."  # ":visible" is a property of the scene root
+	return "%s '%s' is not a node path: a ':' starts a property path, and %s names a node. Pass %s=%s" % [field, _shown(value), field, field, _shown(node)]
+
+
+static func _shown(text: String) -> String:
+	var t := text.replace("\n", " ").replace("\r", " ")
+	return t if t.length() <= PATH_CHARS else t.left(PATH_CHARS) + "..."
 
 
 ## A depth bound from a number or numeric text: finite, 0..DEPTH_MAX; null for anything else (bools too).

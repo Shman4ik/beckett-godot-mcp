@@ -48,7 +48,7 @@ func _register(registry) -> void:
 	registry.register({
 		"name": "assert_node_state",
 		"description": "Assert a property of a node in the RUNNING game: equals, not_equals, min, max, contains, or exists. Same selectors as runtime_get_property (target path, or class/name/text + nth/under). Numbers and vectors compare with tolerance (default 0.001); \"(1, 2)\", [1,2] and Vector2(1,2) agree. A failed assertion is a result with passed:false and the actual value, not a tool error. timeout_ms waits for it to become true. Details: help(tool=\"assert_node_state\").",
-		"help": "Reads the property with the game's own 'get' command (so nested paths like position:x or material_override:shader_parameter/tint work) and checks every expectation you gave. All must hold.\n\nTarget: `target` (or `path`) = node path/name in the running game; or a live selector: class (native or class_name), name (contains), text (contains), nth (default 0), under (scope).\n\nExpectations (at least one):\n  equals       value must match. Numbers use tolerance; vectors/colors may be [x,y,z], \"(x, y, z)\" or \"#rrggbb\"; text and bools compare exactly; an object compares by key (every key you give must match).\n  not_equals   the opposite of equals.\n  min / max    numeric bounds (inclusive).\n  contains     text contains the substring, or an array has the element.\n  exists       true/false: the node is (not) in the live tree. With exists=false no property is read.\n  tolerance    absolute tolerance for numbers (default 0.001).\n  timeout_ms   keep re-checking every 50 ms until it holds or this many ms pass (default 0 = check once, max 30000).\n\nResult: {passed, target, resolved, property, actual, expected..., failures:[...]}. When the target does not exist the assertion FAILS (failures says so); it is a tool error only when the game is not running, is paused in the debugger, or the target is one of Beckett's own nodes.\n\nExamples:\n  {target:\"Player\", property:\"health\", equals:100}\n  {class:\"Label\", name:\"Score\", property:\"text\", contains:\"Score: 3\", timeout_ms:2000}\n  {target:\"Player\", property:\"position\", equals:[320, 180], tolerance:2}\n  {target:\"Boss\", exists:false}",
+		"help": "Reads the property with the game's own 'get' command (so nested paths like position:x or material_override:shader_parameter/tint work) and checks every expectation you gave. All must hold.\n\nTarget: `target` (or `path`) = node path/name in the running game; or a live selector: class (native or class_name), name (contains), text (contains), nth (default 0), under (scope).\n\nExpectations (at least one):\n  equals       value must match. Numbers use tolerance; vectors/colors may be [x,y,z], \"(x, y, z)\" or \"#rrggbb\"; text and bools compare exactly; an object compares by key (every key you give must match).\n  not_equals   the opposite of equals.\n  min / max    numeric bounds (inclusive).\n  contains     text contains the substring, or an array has the element.\n  exists       true/false: the node is (not) in the live tree. With exists=false no property is read.\n  tolerance    absolute tolerance for numbers (default 0.001).\n  timeout_ms   keep re-checking every 50 ms until it holds or this many ms pass (default 0 = check once, max 30000).\n\nResult: {passed, target, resolved, property, actual, expected..., failures:[...]}, with a PASS line beside it; a failure carries its FAIL line as summary instead. When the target does not exist the assertion FAILS (failures says so); it is a tool error only when the game is not running, is paused in the debugger, or the target is one of Beckett's own nodes.\n\nExamples:\n  {target:\"Player\", property:\"health\", equals:100}\n  {class:\"Label\", name:\"Score\", property:\"text\", contains:\"Score: 3\", timeout_ms:2000}\n  {target:\"Player\", property:\"position\", equals:[320, 180], tolerance:2}\n  {target:\"Boss\", exists:false}",
 		"readonly": true,
 		"input_schema": {"type": "object", "properties": {
 			"target": {"type": "string", "description": "node path/name in the running game (or use class/name/text selectors)"},
@@ -320,6 +320,16 @@ static func _values_match(actual: Variant, expected: Variant, tol: float) -> boo
 	return actual == expected
 
 
+const TypedJson := preload("res://addons/beckett/core/typed_json.gd")  # same(): the one node_state rule (1.17)
+
+
+## equals / not_equals: TypedJson.same, the rule every node_state assert judges by (1.17: 12 is 12.0, a vector read
+## matches [0, 6, 11], "0 6 11", "Vector3(0, 6, 11)" or {x, y, z}), or within `tol` by this tool's own match (an object
+## by the keys given, numbers inside text).
+static func _equals(actual: Variant, expected: Variant, tol: float) -> bool:
+	return TypedJson.same(actual, expected) or _values_match(actual, expected, tol)
+
+
 ## What a value looks like in a failure line: short, and never a wall of text.
 static func _shown(v: Variant) -> String:
 	var s := JSON.stringify(v) if (v is Dictionary or v is Array) else str(v)
@@ -350,9 +360,9 @@ static func _jsonable(v: Variant) -> Variant:
 ## contains). Empty = all hold.
 static func _expectation_failures(actual: Variant, args: Dictionary, tol: float, subject: String) -> Array:
 	var fails: Array = []
-	if args.has("equals") and not _values_match(actual, args["equals"], tol):
+	if args.has("equals") and not _equals(actual, args["equals"], tol):
 		fails.append("%s: expected %s, got %s" % [subject, _shown(args["equals"]), _shown(actual)])
-	if args.has("not_equals") and _values_match(actual, args["not_equals"], tol):
+	if args.has("not_equals") and _equals(actual, args["not_equals"], tol):
 		fails.append("%s: expected anything but %s" % [subject, _shown(args["not_equals"])])
 	if args.has("min") or args.has("max"):
 		var n := _nums(actual)
@@ -424,14 +434,14 @@ func _node_state_once(args: Dictionary, prop: String, has_exists: bool) -> Dicti
 		if present != want_present:
 			fails.append("%s: expected the node to %s, but it %s" % [label, "exist" if want_present else "be absent", "does not exist" if not present else "exists"])
 		if not present or not want_present or prop.is_empty():
-			return _verdict(fails.is_empty(), _with_fails(body, fails), _line("%s %s" % [label, "exists" if present else "is absent"], fails))
+			return _state_verdict(fails.is_empty(), _with_fails(body, fails), _line("%s %s" % [label, "exists" if present else "is absent"], fails))
 	var get_cmd := {"cmd": "get", "prop": prop}
 	_add_target(get_cmd, args)
 	var r := _send(get_cmd)
 	if _is_error(r):
 		if _is_miss(str(r["error"])):
 			fails.append("%s: %s" % [label, str(r["error"])])
-			return _verdict(false, _with_fails(body, fails), _line(label, fails))
+			return _state_verdict(false, _with_fails(body, fails), _line(label, fails))
 		return r
 	var actual: Variant = r.get("value")
 	body["property"] = prop
@@ -441,7 +451,18 @@ func _node_state_once(args: Dictionary, prop: String, has_exists: bool) -> Dicti
 		if args.has(k):
 			body["expected_" + k if k != "equals" else "expected"] = args[k]
 	fails.append_array(_expectation_failures(actual, args, tol, "%s.%s" % [label, prop]))
-	return _verdict(fails.is_empty(), _with_fails(body, fails), _line("%s.%s = %s" % [label, prop, _shown(actual)], fails))
+	return _state_verdict(fails.is_empty(), _with_fails(body, fails), _line("%s.%s = %s" % [label, prop, _shown(actual)], fails))
+
+
+## assert_node_state's verdict (1.17): a pass is {json, text: "PASS ..."}; a failure is {json} alone, its passed:false,
+## actual and failures with the "FAIL ..." line as json.summary. Still a result, not a tool error; a caller tells the two
+## apart by passed, or by whether a text line came back.
+static func _state_verdict(passed: bool, body: Dictionary, line: String) -> Dictionary:
+	var out := _verdict(passed, body, line)
+	if not passed:
+		(out["json"] as Dictionary)["summary"] = str(out["text"])
+		out.erase("text")
+	return out
 
 
 static func _with_fails(body: Dictionary, fails: Array) -> Dictionary:
