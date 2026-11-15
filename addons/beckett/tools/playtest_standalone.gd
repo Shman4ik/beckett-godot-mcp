@@ -19,7 +19,7 @@ extends SceneTree
 ## It must not name the addon (no preload, no addon path): everything it needs is copied in below. The
 ## static helpers are copies of the editor-side code, and the unit suite pins that they agree with it:
 ##   build_event                      runtime/input_codec.gd
-##   to_bool, coerce, prepare         core/callargs.gd
+##   to_bool, coerce, coerce_write, prepare   core/callargs.gd
 ##   inv_*, operands_of, reads_of     runtime/invariants.gd
 ##   state_*                          runtime/game_state.gd (lookup / compare / evaluate)
 ##   resolve_node, resolve_target     the runtime's path resolver and selector (runtime/mcp_runtime.gd)
@@ -168,19 +168,21 @@ func _physics_process(_delta: float) -> bool:
 	if _replaying:
 		if paused:
 			return false  # only a frame the game really simulates counts, as in the editor's replay window
-		if _tick > _end_frame:
-			_replaying = false
-			_judge_end()
-			return false
 		inv_check(_inv_items, _base(), _tick)
 		# an event stamped f was injected by the game-side window during frame f and acted from f + 1: here it goes
-		# in at the start of frame f + 1
-		while _ev_i < _events.size() and int((_events[_ev_i] as Dictionary).get("f", 0)) < _tick:
+		# in at the start of frame f + 1. The editor's window closes at the head of frame last f + settle (frames 0 to
+		# that - 1 ran), putting in what is left as it closes, and the asserts are judged there.
+		var closing := _tick >= _end_frame
+		while _ev_i < _events.size() and (closing or int((_events[_ev_i] as Dictionary).get("f", 0)) < _tick):
 			var ie := build_event(_events[_ev_i])
 			if ie != null:
 				Input.parse_input_event(ie)
 			_ev_i += 1
 		Input.flush_buffered_events()
+		if closing:
+			_replaying = false
+			_judge_end()
+			return false
 		_tick += 1
 	elif _flowing and not paused:
 		inv_check(_inv_items, _base(), Engine.get_physics_frames() - _inv_f0)
@@ -192,7 +194,7 @@ func _process(_delta: float) -> bool:
 		return false
 	if Time.get_ticks_msec() - _t0 > _budget_ms:
 		if _replaying:
-			var why := "the replay did not finish within %d ms (%d of %d physics frames ran)" % [_budget_ms, _tick, _end_frame + 1]
+			var why := "the replay did not finish within %d ms (%d of %d physics frames ran)" % [_budget_ms, _tick, _end_frame]
 			if paused:
 				why += ": the game kept the tree paused, so the replay could not go on"
 			_replaying = false
@@ -437,6 +439,12 @@ func _try(step: Dictionary) -> Dictionary:
 	return {"ok": false, "status": "fail", "error": "unknown step: use one of click/type/wait/assert/input/inject/state"}
 
 
+## A step that names its node with a ':' property path fails at once, as malformed (ui_do._subpath_fail): such a path
+## never resolves, so waiting on it would only run the step's timeout out. {} for any other target.
+static func _subpath_fail(why: String) -> Dictionary:
+	return {} if why.is_empty() else {"ok": false, "status": "fail", "error": why}
+
+
 static func _sel(v: Variant) -> Dictionary:
 	if v is String:
 		return {"text": str(v)}
@@ -450,10 +458,13 @@ func _try_click(sel: Dictionary) -> Dictionary:
 	if str(msg.get("text", "")) != "" and str(msg.get("class", "")) == "" and str(msg.get("path", "")) == "" and str(msg.get("name", "")) == "":
 		msg = msg.duplicate()
 		msg["class"] = "BaseButton"
+	var bad := _subpath_fail(target_refusal(msg))
+	if not bad.is_empty():
+		return bad
 	var base := _base()
 	var n := resolve_target(base, msg)
 	if n == null:
-		_last_wait = _not_found(msg)
+		_last_wait = not_found_text(msg)
 		return {}
 	if not (n is Control):
 		return {"ok": false, "error": "not a Control (%s): a click step clicks a control" % n.get_class()}
@@ -484,10 +495,13 @@ func _try_click(sel: Dictionary) -> Dictionary:
 func _try_type(msg: Dictionary) -> Dictionary:
 	var spec := msg.duplicate()
 	spec.erase("text")
+	var bad := _subpath_fail(target_refusal(spec))
+	if not bad.is_empty():
+		return bad
 	var base := _base()
 	var n := resolve_target(base, spec)
 	if n == null:
-		_last_wait = _not_found(spec)
+		_last_wait = not_found_text(spec)
 		return {}
 	if not (n is Control):
 		return {"ok": false, "error": "not a Control (%s): a type step drives a focusable text input" % n.get_class()}
@@ -547,6 +561,9 @@ func _try_wait(w: Dictionary) -> Dictionary:
 		_last_wait = "waiting %d ms" % ms
 		return {}
 	if w.has("node"):
+		var bad := _subpath_fail(subpath_refusal("node", str(w["node"]), "", false))
+		if not bad.is_empty():
+			return bad
 		if resolve_node(_base(), str(w["node"])) != null:
 			return {"ok": true, "detail": "node appeared: %s" % str(w["node"])}
 		_last_wait = "node not found yet: %s" % str(w["node"])
@@ -560,6 +577,9 @@ func _try_assert(a: Dictionary) -> Dictionary:
 	if a.has("condition"):
 		return _eval_eventually(str(a["condition"]), "assert")
 	if a.has("node") and a.has("property"):
+		var bad := _subpath_fail(subpath_refusal("node", str(a["node"]), "", false))
+		if not bad.is_empty():
+			return bad
 		var n := resolve_node(_base(), str(a["node"]))
 		if n == null:
 			_last_wait = "assert target not found yet: %s" % str(a["node"])
@@ -594,6 +614,9 @@ func _try_state(spec: Dictionary) -> Dictionary:
 	var bad := state_spec_error(spec)
 	if not bad.is_empty():
 		return {"ok": false, "status": "fail", "error": bad}
+	var sub_bad := _subpath_fail(subpath_refusal("node", str(spec["node"]), "", false))
+	if not sub_bad.is_empty():
+		return sub_bad
 	var n := resolve_node(_base(), str(spec["node"]))
 	if n == null:
 		_last_wait = "state node not found yet: %s" % str(spec["node"]).left(80)
@@ -617,6 +640,18 @@ func _try_inject(spec: Dictionary) -> Dictionary:
 			return {"ok": false, "status": "fail", "error": bad}
 		var sets: Array = spec.get("set", []) if spec.get("set", []) is Array else []
 		var calls: Array = spec.get("call", []) if spec.get("call", []) is Array else []
+		# Before anything is applied: a write names its property beside the node, so its split carries both.
+		for i in sets.size():
+			var sd: Dictionary = sets[i]
+			var sbad := _subpath_fail(subpath_refusal("node", str(sd["node"]), str(sd["property"]), true))
+			if not sbad.is_empty():
+				sbad["error"] = "inject set[%d]: %s" % [i, sbad["error"]]
+				return sbad
+		for i in calls.size():
+			var cbad := _subpath_fail(subpath_refusal("node", str((calls[i] as Dictionary)["node"]), "", false))
+			if not cbad.is_empty():
+				cbad["error"] = "inject call[%d]: %s" % [i, cbad["error"]]
+				return cbad
 		var base := _base()
 		for e in sets + calls:
 			if resolve_node(base, str((e as Dictionary)["node"])) == null:
@@ -718,6 +753,9 @@ static func _eval_node_state(d: Dictionary, scene: Node) -> Dictionary:
 	if target.is_empty() or prop.is_empty() or not d.has("equals"):
 		return {"type": "node_state", "status": "fail", "detail": "node_state needs target, property and equals"}
 	var subject := "%s.%s" % [target, prop]
+	var refused := subpath_refusal("path", target, prop, true)
+	if not refused.is_empty():  # the editor's run gets the runtime's get refusal, a fail (capped as playtest caps a reason)
+		return {"type": "node_state", "status": "fail", "detail": ("%s: %s" % [subject, refused]).left(900)}
 	if scene == null:
 		return {"type": "node_state", "status": "blocked", "detail": "%s: no current scene" % subject}
 	var n := resolve_node(scene, target)
@@ -814,6 +852,8 @@ static func resolve_node(scene: Node, path: String) -> Node:
 		return null
 	if path.is_empty() or path == "." or path == scene.name:
 		return scene
+	if path.contains(":"):
+		return null  # a property path names no node (subpath_refusal says why)
 	var tree := scene.get_tree()
 	if path.begins_with("/root") and tree != null:
 		var absolute := tree.root.get_node_or_null(NodePath(path))
@@ -828,6 +868,42 @@ static func resolve_node(scene: Node, path: String) -> Node:
 	if tree != null and tree.root != null:
 		n = tree.root.find_child(path, true, false)
 	return n
+
+
+const PROPERTY_PATH := "a ':' starts a property path"
+const SUBPATH_SHOWN_MAX := 200
+
+
+## Why `value`, given in `field` as a node path, names no node: "" when it is not a property path
+## (mcp_runtime.subpath_refusal, word for word). `prop` is the property named beside the path; `with_property`
+## false is for a field told the node alone.
+static func subpath_refusal(field: String, value: String, prop: String = "", with_property: bool = true) -> String:
+	var colon := value.find(":")
+	if colon == -1 or value.contains("://"):
+		return ""
+	var node := value.left(colon)
+	if node.is_empty():
+		node = "."
+	var rest := value.substr(colon + 1)
+	if not prop.is_empty():
+		rest = prop if rest.is_empty() else rest + ":" + prop
+	var why := "%s '%s' is not a node path: %s, and %s names a node." % [field, _subpath_shown(value), PROPERTY_PATH, field]
+	if with_property and not rest.is_empty():
+		return why + " Put the node in %s and the property part in property: %s=%s property=%s" % [field, field, _subpath_shown(node), _subpath_shown(rest)]
+	return why + " Pass %s=%s" % [field, _subpath_shown(node)]
+
+
+static func _subpath_shown(text: String) -> String:
+	var t := text.replace("\n", " ").replace("\r", " ")
+	return t if t.length() <= SUBPATH_SHOWN_MAX else t.left(SUBPATH_SHOWN_MAX) + "..."
+
+
+## The ':' refusal for a target (mcp_runtime._target_refusal): its path, or with no path the `under` it is scoped to.
+static func target_refusal(sel: Dictionary) -> String:
+	var path := str(sel.get("path", ""))
+	if not path.is_empty():
+		return subpath_refusal("path", path, str(sel.get("prop", "")), sel.has("prop"))
+	return subpath_refusal("under", str(sel.get("under", "")), "", false)
 
 
 ## A node by "path", or by a selector (class / name / text, optionally "under" a node) and its "nth" match.
@@ -897,7 +973,11 @@ static func _node_text(n: Node) -> String:
 	return ""
 
 
-static func _not_found(sel: Dictionary) -> String:
+## Why a target's path or selector named no node (the runtime's _not_found): a ':' refusal first.
+static func not_found_text(sel: Dictionary) -> String:
+	var refused := target_refusal(sel)
+	if not refused.is_empty():
+		return refused
 	var path := str(sel.get("path", ""))
 	if not path.is_empty():
 		return "node not found: %s" % path
@@ -915,8 +995,8 @@ static func _not_found(sel: Dictionary) -> String:
 # ---------------------------------------------------------------- writing state (the runtime's set and call)
 
 ## Write a property (a sub-property with ':', position:x) the way the runtime's set command does: the value is
-## coerced to the property's type, a value that cannot fit is refused, and the write is read back.
-## {ok, before, after} or {ok: false, error}.
+## held to the type the property declares (coerce_write), a value that cannot fit is refused, and the write is
+## read back. {ok, before, after} or {ok: false, error, suggestion}.
 static func write_property(n: Node, prop: String, value: Variant) -> Dictionary:
 	if n == null:
 		return {"ok": false, "error": "node not found"}
@@ -924,10 +1004,11 @@ static func write_property(n: Node, prop: String, value: Variant) -> Dictionary:
 	if not bool(res.get("ok", false)):
 		return res
 	var before: Variant = _read_at(res)
-	var want: Variant = _coerce_to(before, value)
-	var mismatch := _coercion_error(before, want)
-	if not mismatch.is_empty():
-		return {"ok": false, "error": mismatch}
+	var fit := coerce_write(value, _declared(res), before)
+	if not bool(fit.get("ok", false)):
+		return {"ok": false, "error": "%s.%s: %s" % [(res["owner"] as Object).get_class(), str(res["leaf"]), str(fit["error"])],
+			"suggestion": str(fit.get("suggestion", ""))}
+	var want: Variant = fit["value"]
 	if bool(res.get("indexed", false)):
 		(res["owner"] as Object).set_indexed(NodePath(str(res["leaf"])), want)
 	else:
@@ -956,7 +1037,17 @@ static func call_method(n: Node, method: String, args: Array, scene: Node = null
 	var prep := prepare(n, method, args, scene)
 	if not bool(prep.get("ok", false)):
 		return {"ok": false, "error": "%s.%s: %s" % [n.get_class(), method, str(prep.get("error", "argument mismatch"))]}
-	return {"ok": true, "result": _safe(n.callv(method, prep["args"]))}
+	var call_args: Array = (prep["args"] as Array).duplicate()
+	# set, set_deferred and set_indexed take the value as a Variant: hold it to the property's type, as runtime "call" does.
+	if method in ["set", "set_deferred", "set_indexed"] and call_args.size() == 2:
+		var res := _property_owner(n, str(call_args[0]))
+		if bool(res.get("ok", false)):
+			var fit := coerce_write(call_args[1], _declared(res), _read_at(res))
+			if not bool(fit.get("ok", false)):
+				return {"ok": false, "error": "%s.%s: arg 1 (value): %s" % [n.get_class(), method, str(fit["error"])],
+					"suggestion": str(fit.get("suggestion", ""))}
+			call_args[1] = fit["value"]
+	return {"ok": true, "result": _safe(n.callv(method, call_args))}
 
 
 static func _property_owner(obj: Object, prop: String) -> Dictionary:
@@ -1003,17 +1094,6 @@ static func _read_at(res: Dictionary) -> Variant:
 	return holder.get(str(res.get("leaf", "")))
 
 
-static func _coercion_error(current: Variant, want: Variant) -> String:
-	var ct := typeof(current)
-	if ct == TYPE_NIL or typeof(want) == ct:
-		return ""
-	if want == null and (ct == TYPE_OBJECT or ct == TYPE_NODE_PATH):
-		return ""
-	if ct == TYPE_OBJECT and want is Object:
-		return ""
-	return "cannot store %s in a %s property (value: %s)" % [type_string(typeof(want)), type_string(ct), str(_safe(want))]
-
-
 static func _value_eq(a: Variant, b: Variant) -> bool:
 	if typeof(a) != typeof(b):
 		return false
@@ -1041,40 +1121,15 @@ static func _value_eq(a: Variant, b: Variant) -> bool:
 	return a == b
 
 
-static func _coerce_to(current: Variant, value: Variant) -> Variant:
-	var v: Variant = value
-	if v is String:
-		var raw := (v as String).strip_edges()
-		if raw.begins_with("[") or raw.begins_with("{"):
-			var parsed: Variant = JSON.parse_string(raw)
-			if parsed is Array or parsed is Dictionary:
-				v = parsed
-	match typeof(current):
-		TYPE_INT:
-			return int(v) if (v is String or v is float) else v
-		TYPE_FLOAT:
-			return float(v) if (v is String or v is int) else v
-		TYPE_BOOL:
-			if v is String:
-				return (v as String).to_lower() in ["true", "1", "yes"]
-			return to_bool(v)
-		TYPE_STRING:
-			return str(v)
-		TYPE_VECTOR2:
-			return _vec2(v)
-		TYPE_VECTOR3:
-			if v is Array and (v as Array).size() >= 3:
-				return Vector3((v as Array)[0], (v as Array)[1], (v as Array)[2])
-			if v is Dictionary:
-				return Vector3((v as Dictionary).get("x", 0), (v as Dictionary).get("y", 0), (v as Dictionary).get("z", 0))
-			return Vector3.ZERO
-		TYPE_COLOR:
-			if v is Array and (v as Array).size() >= 3:
-				var arr: Array = v
-				return Color(arr[0], arr[1], arr[2], arr[3] if arr.size() > 3 else 1.0)
-			if v is String:
-				return Color(v as String)
-	return v
+## The property-list entry of a resolved leaf, {} for a struct member (position:y), which has none of its own.
+static func _declared(res: Dictionary) -> Dictionary:
+	if bool(res.get("indexed", false)):
+		return {}
+	var leaf := str(res.get("leaf", ""))
+	for p in (res["owner"] as Object).get_property_list():
+		if str(p.get("name", "")) == leaf:
+			return p
+	return {}
 
 
 ## A JSON-safe copy of a value for a reply: an object or a maths struct is its text.
@@ -1298,12 +1353,12 @@ static func coerce(raw: Variant, want: int) -> Dictionary:
 				return {"ok": true, "value": str(raw)}
 			return _err("expected String, got %s" % _show(raw))
 		TYPE_STRING_NAME:
-			if raw is String:
-				return {"ok": true, "value": StringName(raw as String)}
+			if raw is String or raw is NodePath:
+				return {"ok": true, "value": StringName(_literal_text(str(raw), "&", "StringName"))}
 			return _err("expected StringName, got %s" % _show(raw))
 		TYPE_NODE_PATH:
-			if raw is String:
-				return {"ok": true, "value": NodePath(raw as String)}
+			if raw is String or raw is StringName:
+				return {"ok": true, "value": NodePath(_literal_text(str(raw), "^", "NodePath"))}
 			return _err("expected NodePath, got %s" % _show(raw))
 		TYPE_VECTOR2:
 			return _vec(raw, 2, false)
@@ -1324,17 +1379,83 @@ static func coerce(raw: Variant, want: int) -> Dictionary:
 				var q: Array = raw
 				return {"ok": true, "value": Quaternion(q[0], q[1], q[2], q[3])}
 			return _literal(raw, want, 'pass [x,y,z,w] or "Quaternion(...)"')
-		TYPE_RECT2:
-			if raw is Array and (raw as Array).size() == 4 and _all_numbers(raw):
-				var r: Array = raw
-				return {"ok": true, "value": Rect2(r[0], r[1], r[2], r[3])}
-			return _literal(raw, want, 'pass [x,y,w,h] or "Rect2(...)"')
-		TYPE_RECT2I:
-			if raw is Array and (raw as Array).size() == 4 and _all_numbers(raw):
-				var ri: Array = raw
-				return {"ok": true, "value": Rect2i(int(ri[0]), int(ri[1]), int(ri[2]), int(ri[3]))}
-			return _literal(raw, want, 'pass [x,y,w,h] or "Rect2i(...)"')
-	return _err("expected %s: the standalone test coerces bool, int, float, String, StringName, NodePath, Vector2/3/4 (and i), Color, Quaternion and Rect2 (and i), got %s" % [type_string(want), _show(raw)])
+		TYPE_RECT2, TYPE_RECT2I, TYPE_TRANSFORM2D, TYPE_BASIS, TYPE_TRANSFORM3D, TYPE_PROJECTION, TYPE_AABB, TYPE_PLANE:
+			return _matrix(raw, want)
+	return _err("expected %s: the standalone test coerces bool, int, float, String, StringName, NodePath, Vector2/3/4 (and i), Color, Quaternion, Rect2 (and i), Transform2D/3D, Basis, Projection, AABB and Plane, got %s" % [type_string(want), _show(raw)])
+
+
+## The value a WRITE to a property stores (CallArgs.coerce_write): held to the type the property declares (`info`,
+## its get_property_list() entry), or to the type of the value it holds when it declares none. {ok, value} or
+## {ok: false, error, suggestion}.
+static func coerce_write(value: Variant, info: Dictionary, current: Variant) -> Dictionary:
+	var want := int(info.get("type", TYPE_NIL))
+	var untyped := want == TYPE_NIL and not info.is_empty()
+	if want == TYPE_NIL:
+		want = typeof(current)
+	elif want == TYPE_STRING and typeof(current) in [TYPE_STRING_NAME, TYPE_NODE_PATH]:
+		want = typeof(current)
+	var v: Variant = value
+	if v is String and not (want in [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH]):
+		var raw := (v as String).strip_edges()
+		if raw.begins_with("[") or raw.begins_with("{"):
+			var parsed: Variant = JSON.parse_string(raw)
+			if parsed is Array or parsed is Dictionary:
+				v = parsed
+	if want == TYPE_NIL:
+		return {"ok": true, "value": v}
+	if want == TYPE_NODE_PATH and typeof(v) == TYPE_NIL:
+		return {"ok": true, "value": NodePath()}
+	if want == TYPE_OBJECT:
+		if typeof(v) == TYPE_NIL or v is Object:
+			return {"ok": true, "value": v}
+		var leaf := str(info.get("name", ""))
+		return {"ok": false, "error": "expected an object - only null (to clear it) can be written to an object property",
+			"suggestion": "write one of the object's own properties with a ':' path instead, e.g. %s:<property>" % (leaf if not leaf.is_empty() else "<property>")}
+	var r := coerce(v, want)
+	if not bool(r.get("ok", false)) and untyped and want == TYPE_INT:
+		var as_float := coerce(v, TYPE_FLOAT)
+		if bool(as_float.get("ok", false)):
+			r = as_float
+	if bool(r.get("ok", false)):
+		return r
+	var choices := enum_choices(info) if want == TYPE_INT else ""
+	if not choices.is_empty():
+		return {"ok": false, "error": str(r.get("error", "")), "suggestion": "%s is an enum: pass the number of one of %s" % [str(info.get("name", "")), choices]}
+	return {"ok": false, "error": str(r.get("error", "")), "suggestion": "pass a %s" % type_string(want)}
+
+
+## "0 Inherit, 1 Pausable, ..." for a property with an enum hint, "" for any other (CallArgs.enum_choices).
+static func enum_choices(info: Dictionary) -> String:
+	if int(info.get("hint", PROPERTY_HINT_NONE)) != PROPERTY_HINT_ENUM:
+		return ""
+	var out: Array = []
+	var next := 0
+	for item: String in str(info.get("hint_string", "")).split(",", false):
+		var label := item.strip_edges()
+		var at := label.rfind(":")
+		if at != -1 and label.substr(at + 1).is_valid_int():
+			next = label.substr(at + 1).to_int()
+			label = label.substr(0, at)
+		out.append("%d %s" % [next, label])
+		next += 1
+	return ", ".join(out)
+
+
+const VECTOR_LITERALS := ["Vector2", "Vector2i", "Vector3", "Vector3i", "Vector4", "Vector4i"]
+
+
+## The value of a Godot literal that is ONE constructor named in `names` holding nothing but numbers, read with
+## str_to_var; null for any other text (CallArgs.literal: str_to_var loads whatever a Resource("...") names).
+static func literal(text: String, names: Array) -> Variant:
+	var s := text.strip_edges()
+	var open := s.find("(")
+	if open < 1 or not s.ends_with(")") or not names.has(s.left(open).strip_edges()):
+		return null
+	for part: String in s.substr(open + 1, s.length() - open - 2).split(","):
+		var p := part.strip_edges()
+		if not (p.is_valid_float() or p in ["inf", "-inf", "inf_neg", "nan"]):
+			return null
+	return str_to_var(s)
 
 
 static func _vec(raw: Variant, dim: int, as_int: bool) -> Dictionary:
@@ -1364,11 +1485,11 @@ static func _vec(raw: Variant, dim: int, as_int: bool) -> Dictionary:
 					return _err('expected %s: the dict needs a numeric "%s"' % [want_name, k])
 				comps.append(float(v))
 		TYPE_STRING:
-			var parsed: Variant = str_to_var(raw as String)
+			var parsed: Variant = literal(raw as String, VECTOR_LITERALS)
 			match typeof(parsed):
 				TYPE_VECTOR2, TYPE_VECTOR2I, TYPE_VECTOR3, TYPE_VECTOR3I, TYPE_VECTOR4, TYPE_VECTOR4I:
 					return _vec(parsed, dim, as_int)
-			var parts: PackedStringArray = (raw as String).replace(",", " ").split(" ", false)
+			var parts := _components(raw as String)
 			if parts.size() == dim:
 				for p in parts:
 					if not p.is_valid_float():
@@ -1392,20 +1513,68 @@ static func _vec(raw: Variant, dim: int, as_int: bool) -> Dictionary:
 	return {"ok": true, "value": value}
 
 
+## How many numbers each part of a matrix-family value holds (CallArgs.MATRIX_PARTS).
+const MATRIX_PARTS := {
+	TYPE_RECT2: [2, 2], TYPE_RECT2I: [2, 2], TYPE_TRANSFORM2D: [2, 2, 2], TYPE_BASIS: [3, 3, 3],
+	TYPE_TRANSFORM3D: [3, 3, 3, 3], TYPE_PROJECTION: [4, 4, 4, 4], TYPE_AABB: [3, 3], TYPE_PLANE: [3, 1],
+}
+
+
+## A matrix-family value from a nested array, the same numbers flat, or a Godot literal (CallArgs._matrix).
+static func _matrix(raw: Variant, want: int) -> Dictionary:
+	var f: Variant = null
+	if raw is Array:
+		f = _matrix_numbers(raw as Array, MATRIX_PARTS[want])
+	if f == null:
+		return _literal(raw, want, 'pass the nested array a runtime read returns, the same numbers flat, or "%s(...)"' % type_string(want))
+	var n: Array = f
+	match want:
+		TYPE_RECT2:
+			return {"ok": true, "value": Rect2(n[0], n[1], n[2], n[3])}
+		TYPE_RECT2I:
+			return {"ok": true, "value": Rect2i(int(n[0]), int(n[1]), int(n[2]), int(n[3]))}
+		TYPE_TRANSFORM2D:
+			return {"ok": true, "value": Transform2D(Vector2(n[0], n[1]), Vector2(n[2], n[3]), Vector2(n[4], n[5]))}
+		TYPE_BASIS:
+			return {"ok": true, "value": Basis(Vector3(n[0], n[1], n[2]), Vector3(n[3], n[4], n[5]), Vector3(n[6], n[7], n[8]))}
+		TYPE_TRANSFORM3D:
+			return {"ok": true, "value": Transform3D(Basis(Vector3(n[0], n[1], n[2]), Vector3(n[3], n[4], n[5]), Vector3(n[6], n[7], n[8])), Vector3(n[9], n[10], n[11]))}
+		TYPE_PROJECTION:
+			return {"ok": true, "value": Projection(Vector4(n[0], n[1], n[2], n[3]), Vector4(n[4], n[5], n[6], n[7]), Vector4(n[8], n[9], n[10], n[11]), Vector4(n[12], n[13], n[14], n[15]))}
+		TYPE_AABB:
+			return {"ok": true, "value": AABB(Vector3(n[0], n[1], n[2]), Vector3(n[3], n[4], n[5]))}
+	return {"ok": true, "value": Plane(Vector3(n[0], n[1], n[2]), float(n[3]))}
+
+
+static func _matrix_numbers(raw: Array, parts: Array) -> Variant:
+	var total := 0
+	for p in parts:
+		total += int(p)
+	if raw.size() == total and _all_numbers(raw):
+		return raw
+	if raw.size() != parts.size():
+		return null
+	var out: Array = []
+	for i in parts.size():
+		var part: Variant = raw[i]
+		if int(parts[i]) == 1 and (part is int or part is float):
+			out.append(part)
+		elif part is Array and (part as Array).size() == int(parts[i]) and _all_numbers(part as Array):
+			out.append_array(part as Array)
+		else:
+			return null
+	return out
+
+
 static func _color(raw: Variant) -> Dictionary:
 	match typeof(raw):
 		TYPE_COLOR:
 			return {"ok": true, "value": raw}
 		TYPE_STRING:
-			var s := (raw as String).strip_edges()
-			var sentinel := Color(-9999.0, -9999.0, -9999.0, -9999.0)
-			var c := Color.from_string(s, sentinel)
-			if c != sentinel:
+			var c: Variant = _color_text(raw as String)
+			if c is Color:
 				return {"ok": true, "value": c}
-			var parsed: Variant = str_to_var(s)
-			if parsed is Color:
-				return {"ok": true, "value": parsed}
-			return _err('expected Color: "%s" is not a hex value or color name' % s)
+			return _err('expected Color: "%s" is not a hex value, a color name or 3-4 numbers' % (raw as String).strip_edges())
 		TYPE_ARRAY:
 			var arr: Array = raw
 			if (arr.size() == 3 or arr.size() == 4) and _all_numbers(arr):
@@ -1417,12 +1586,61 @@ static func _color(raw: Variant) -> Dictionary:
 	return _err('expected Color - pass "#rrggbb", a color name, or [r,g,b,a]')
 
 
+## A Color from text (a hex code, a name, Color.GOLD, Color(...), "(r, g, b)", "r g b"), or null (CallArgs._color_text).
+static func _color_text(text: String) -> Variant:
+	var s := text.strip_edges()
+	var none := Color(-9999.0, -9999.0, -9999.0, -9999.0)
+	var c := Color.from_string(s.trim_prefix("Color."), none)
+	if c != none:
+		return c
+	var inner := s.trim_prefix("Color").strip_edges()
+	if inner.begins_with("(") and inner.ends_with(")"):
+		inner = inner.substr(1, inner.length() - 2).strip_edges()
+	if inner.length() >= 2 and inner.begins_with("\"") and inner.ends_with("\""):
+		c = Color.from_string(inner.substr(1, inner.length() - 2), none)
+		if c == none:
+			return null
+		return c
+	var parts := _components(inner)
+	if parts.size() != 3 and parts.size() != 4:
+		return null
+	var ch: Array = []
+	for p in parts:
+		if not p.is_valid_float():
+			return null
+		ch.append(p.to_float())
+	return Color(ch[0], ch[1], ch[2], ch[3] if ch.size() == 4 else 1.0)
+
+
+## The components of a vector or a color written as text: "1 0 0", "1, 0, 0", or either in one pair of brackets.
+static func _components(raw: String) -> PackedStringArray:
+	var s := raw.strip_edges()
+	if s.length() >= 2 and ((s.begins_with("(") and s.ends_with(")")) or (s.begins_with("[") and s.ends_with("]"))):
+		s = s.substr(1, s.length() - 2)
+	return s.replace(",", " ").split(" ", false)
+
+
 static func _literal(raw: Variant, want: int, hint: String) -> Dictionary:
 	if raw is String:
-		var parsed: Variant = str_to_var(raw as String)
+		var parsed: Variant = literal(raw as String, [type_string(want)])
 		if typeof(parsed) == want:
 			return {"ok": true, "value": parsed}
 	return _err("expected %s, got %s - %s" % [type_string(want), _show(raw), hint])
+
+
+## The path or name a NodePath or StringName literal spells (NodePath("a"), ^"a", &"n", StringName("n"), "a"), else
+## `s` as it came (CallArgs._literal_text).
+static func _literal_text(s: String, sigil: String, ctor: String) -> String:
+	var t := s.strip_edges()
+	if t.begins_with(sigil + "\""):
+		t = t.substr(sigil.length())
+	elif t.begins_with(ctor + "(") and t.ends_with(")"):
+		t = t.substr(ctor.length() + 1, t.length() - ctor.length() - 2).strip_edges()
+		if t.is_empty():
+			return ""
+	if t.length() >= 2 and t.begins_with("\"") and t.ends_with("\""):
+		return t.substr(1, t.length() - 2).c_unescape()
+	return s
 
 
 static func _all_numbers(arr: Array) -> bool:
