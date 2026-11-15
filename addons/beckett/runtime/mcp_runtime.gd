@@ -281,7 +281,11 @@ func _replay_open(msg: Dictionary) -> Dictionary:
 	if not inv_err.is_empty():
 		return {"ok": false, "error": inv_err}
 	_replay_perf.begin()
-	return clock.open_replay(msg.get("events", []), maxi(0, int(msg.get("settle_frames", 4))), Callable(self, "_replay_head"))
+	var opened: Dictionary = clock.open_replay(msg.get("events", []), maxi(0, int(msg.get("settle_frames", 4))), Callable(self, "_replay_head"))
+	if not bool(opened.get("ok", false)):
+		_replay_perf.end()  # no window opened (a stamp past REPLAY_FRAMES_MAX): nothing is timed, no rules stay armed
+		_inv.close()
+	return opened
 
 
 ## The start of a replay frame (the clock calls it at every head, before the frame's nodes run): the invariants judge
