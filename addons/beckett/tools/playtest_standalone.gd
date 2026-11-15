@@ -21,6 +21,7 @@ extends SceneTree
 ##   build_event                      runtime/input_codec.gd
 ##   to_bool, coerce, coerce_write, prepare   core/callargs.gd
 ##   inv_*, operands_of, reads_of     runtime/invariants.gd
+##   unsafe_call, UNSAFE_CALLS        runtime/invariants.gd (no expression may call str_to_var)
 ##   state_*                          runtime/game_state.gd (lookup / compare / evaluate)
 ##   resolve_node, resolve_target     the runtime's path resolver and selector (runtime/mcp_runtime.gd)
 ##   write_property, call_method      the runtime's set and call commands
@@ -49,6 +50,11 @@ const MAX_READS := 6         # operand values reported for a false expression or
 const INV_MAX_ITEMS := 16
 const INV_MAX_NAME := 60
 const INV_MAX_EXPR := 400
+## The calls no expression may make (Invariants.UNSAFE_CALLS, word for word): unsafe_call refuses them before parsing.
+const UNSAFE_CALLS := {
+	"str_to_var": "it loads any file a Resource(\"...\") in its text names, outside the project as well",
+	"bytes_to_var_with_objects": "it builds an object of any class out of bytes",
+}
 const INJECT_MAX_FRAMES := 600
 const STEP_SETTLE := 2       # frames the UI gets to react between two steps (the ui_do default)
 const STATE_OPS := ["eq", "ne", "lt", "le", "gt", "ge", "contains", "exists"]
@@ -595,6 +601,9 @@ func _try_assert(a: Dictionary) -> Dictionary:
 
 func _eval_eventually(src: String, what: String) -> Dictionary:
 	if _cond == null or _cond_src != src:
+		var unsafe := unsafe_call(src)
+		if not unsafe.is_empty():
+			return {"ok": false, "status": "fail", "error": "%s condition refused: %s" % [what, unsafe]}
 		_cond = Expression.new()
 		_cond_src = src
 		if _cond.parse(src) != OK:
@@ -773,6 +782,9 @@ static func _eval_expr(d: Dictionary, scene: Node) -> Dictionary:
 	var cond := str(d.get("condition", "")).strip_edges()
 	if cond.is_empty():
 		return {"type": "expr", "status": "fail", "detail": "expr needs a condition"}
+	var unsafe := unsafe_call(cond)
+	if not unsafe.is_empty():  # the game's eval refuses it before parsing, and op=run reports that as a fail
+		return {"type": "expr", "status": "fail", "detail": ("%s: expr refused: %s" % [cond.left(120), unsafe]).left(DETAIL_CAP)}
 	if scene == null:
 		return {"type": "expr", "status": "blocked", "detail": "%s: no current scene" % cond.left(120)}
 	var ex := Expression.new()
@@ -1638,7 +1650,7 @@ const VECTOR_LITERALS := ["Vector2", "Vector2i", "Vector3", "Vector3i", "Vector4
 
 ## The value of a Godot literal that is ONE constructor named in `names` holding nothing but numbers, read with
 ## str_to_var; null for any other text (CallArgs.literal: str_to_var loads whatever a Resource("...") names).
-static func literal(text: String, names: Array) -> Variant:
+static func plain_literal(text: String, names: Array) -> Variant:
 	var s := text.strip_edges()
 	var open := s.find("(")
 	if open < 1 or not s.ends_with(")") or not names.has(s.left(open).strip_edges()):
@@ -1677,7 +1689,7 @@ static func _vec(raw: Variant, dim: int, as_int: bool) -> Dictionary:
 					return _err('expected %s: the dict needs a numeric "%s"' % [want_name, k])
 				comps.append(float(v))
 		TYPE_STRING:
-			var parsed: Variant = literal(raw as String, VECTOR_LITERALS)
+			var parsed: Variant = plain_literal(raw as String, VECTOR_LITERALS)
 			match typeof(parsed):
 				TYPE_VECTOR2, TYPE_VECTOR2I, TYPE_VECTOR3, TYPE_VECTOR3I, TYPE_VECTOR4, TYPE_VECTOR4I:
 					return _vec(parsed, dim, as_int)
@@ -1814,7 +1826,7 @@ static func _components(raw: String) -> PackedStringArray:
 
 static func _literal(raw: Variant, want: int, hint: String) -> Dictionary:
 	if raw is String:
-		var parsed: Variant = literal(raw as String, [type_string(want)])
+		var parsed: Variant = plain_literal(raw as String, [type_string(want)])
 		if typeof(parsed) == want:
 			return {"ok": true, "value": parsed}
 	return _err("expected %s, got %s - %s" % [type_string(want), _show(raw), hint])
@@ -1886,6 +1898,9 @@ static func inv_open(list: Variant) -> Dictionary:
 		if seen.has(nm):
 			return {"ok": false, "error": "two invariants are named '%s': names identify them in the results, so they must differ" % nm}
 		seen[nm] = true
+		var unsafe := unsafe_call(text)
+		if not unsafe.is_empty():
+			return {"ok": false, "error": "invariant '%s': %s" % [nm, unsafe]}
 		var ex := Expression.new()
 		if ex.parse(text) != OK:
 			return {"ok": false, "error": "invariant '%s' does not parse: %s" % [nm, ex.get_error_text()]}
@@ -1990,6 +2005,17 @@ static func is_pure_read(operand: String) -> bool:
 			continue
 		return false
 	return true
+
+
+## "" when the expression `src` may be evaluated, else why not: it calls one of UNSAFE_CALLS (text inside a string
+## literal is not a call). Invariants.unsafe_call, word for word.
+static func unsafe_call(src: String) -> String:
+	var re := RegEx.create_from_string("([A-Za-z_][A-Za-z0-9_]*)\\s*\\(")
+	for m in re.search_all(_without_strings(src)):
+		var fn := m.get_string(1)
+		if UNSAFE_CALLS.has(fn):
+			return "an expression may not call %s(): %s" % [fn, UNSAFE_CALLS[fn]]
+	return ""
 
 
 static func _without_strings(s: String) -> String:
