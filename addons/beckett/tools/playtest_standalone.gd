@@ -1015,7 +1015,7 @@ static func _tv_text_numbers(text: String) -> Variant:
 				return null
 			return _tv_numbers_of(render_value(c.get("value")))
 		if TV_LITERAL_TYPES.has(type_name):
-			var lit: Variant = literal(s, [type_name])
+			var lit: Variant = plain_literal(s, [type_name])
 			if lit == null:
 				return null
 			return _tv_numbers_of(render_value(lit))
