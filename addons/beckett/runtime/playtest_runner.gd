@@ -22,9 +22,9 @@ extends Node
 ## released before the next suite starts.
 ##
 ## Self-contained by design: it preloads only path_guard (its one write, the .actual.png of a failed screenshot
-## assert), callargs, invariants, input_codec (held-input bookkeeping) and physics_overlap (with game_state, the
-## one file that preloads); a project carries just those under addons/beckett to run it. It keeps
-## its own copy of the input codec's build_event and of replay_perf's summary maths (both say so: extend both).
+## assert), callargs, invariants, input_codec (held-input bookkeeping), replay_perf (the perf frame clock) and
+## physics_overlap (with game_state, the one file that preloads); a project carries just those under addons/beckett to
+## run it. It keeps its own copy of the input codec's build_event (it says so: extend both).
 ## The suites, the scenes they name and the baselines are read without the read check (SECURITY.md): a CI run
 ## executes the project's own code anyway.
 
@@ -33,6 +33,7 @@ const CallArgs := preload("res://addons/beckett/core/callargs.gd")  # flags in a
 const Invariants := preload("res://addons/beckett/runtime/invariants.gd")  # the per-frame rule checker, the same module the game arms
 const InputCodec := preload("res://addons/beckett/runtime/input_codec.gd")  # track / release_all: input a suite left held
 const PhysicsOverlap := preload("res://addons/beckett/runtime/physics_overlap.gd")  # the no_overlap assert, on this process's physics
+const ReplayPerf := preload("res://addons/beckett/runtime/replay_perf.gd")  # the frame clock the editor's replay window times perf with (1.17)
 
 const TEST_DIR_SETTING := "beckett/test_dir"
 const TEST_DIR_DEFAULT := "res://tests"
@@ -44,7 +45,6 @@ const DETAIL_CAP := 300
 ## Wall-clock budget of one suite on top of the time its frames take at the physics tick rate: a game that keeps
 ## the tree paused ends the suite blocked instead of hanging CI.
 const SUITE_BUDGET_MS := 20000
-const PERF_CAP := 36000
 const ASSERT_TYPES := ["node_state", "expr", "screen_text", "screenshot", "perf", "no_overlap"]
 const PERF_METRICS := ["frames", "frame_ms_min", "frame_ms_avg", "frame_ms_p95", "frame_ms_max", "fps_min", "fps_avg",
 	"memory_static_end", "memory_delta", "orphan_delta", "draw_calls_end"]
@@ -57,11 +57,8 @@ var _suites_failed := 0
 var _suites_blocked := 0
 var _not_judged := 0
 
-# Perf capture across the replay window: mirrors runtime/replay_perf.gd (deliberately: this runner is self-contained).
-var _perf_ms := PackedFloat64Array()
-var _perf_fps := PackedFloat64Array()
-var _perf_mem0 := 0.0
-var _perf_orphan0 := 0.0
+# Perf capture across the replay window: the editor window's own frame clock, timed once per process frame.
+var _perf = ReplayPerf.new()
 
 var _queue: Array = []             # suite files still to run
 var _total := 0
@@ -100,6 +97,11 @@ func _physics_process(_delta: float) -> void:
 		_step()
 	else:
 		_start_next()
+
+
+## The frame clock's fixed point (1.17): once per process frame, a no-op while no suite's window is open.
+func _process(_delta: float) -> void:
+	_perf.frame(Time.get_ticks_usec())
 
 
 ## The game ended the run under us: it quit (the tree is being torn down), or changed the scene, which replaces
@@ -203,10 +205,7 @@ func _start_next() -> void:
 	if not _events.is_empty():
 		last_f = int(_events[_events.size() - 1]["_f"])
 	_end = last_f + SETTLE_FRAMES
-	_perf_ms = PackedFloat64Array()
-	_perf_fps = PackedFloat64Array()
-	_perf_mem0 = Performance.get_monitor(Performance.MEMORY_STATIC)
-	_perf_orphan0 = Performance.get_monitor(Performance.OBJECT_ORPHAN_NODE_COUNT)
+	_perf.begin()
 	var tps := maxi(1, int(ProjectSettings.get_setting("physics/common/physics_ticks_per_second", 60)))
 	_deadline = Time.get_ticks_msec() + SUITE_BUDGET_MS + int(float(_end) * 1000.0 / float(tps)) * 4
 	get_tree().root.add_child(inst)
@@ -266,7 +265,6 @@ func _step() -> void:
 		return
 	if get_tree().paused:
 		return  # a paused game is not simulating: this frame did not run, and it is not counted
-	_perf_tick()
 	_tick += 1
 	while _ev_i < _events.size() and int(_events[_ev_i]["_f"]) < _tick:
 		var ie := _build_event(_events[_ev_i])
@@ -281,6 +279,7 @@ func _step() -> void:
 		_inv.check(_scene, _tick)
 	if _ev_i >= _events.size() and _tick >= _end:
 		_running = false
+		_perf.end()
 		_run_asserts()
 		_close_suite()
 
@@ -342,6 +341,7 @@ func _close_suite() -> void:
 		_scene.queue_free()
 	_scene = null
 	_inv.close()
+	_perf.end()
 	if not _held.is_empty():
 		InputCodec.release_all(_held)
 		Input.flush_buffered_events()
@@ -655,44 +655,11 @@ func _eval_no_overlap(d: Dictionary) -> Dictionary:
 	return out
 
 
-# ---------------------------------------------------------------- perf (mirrors runtime/replay_perf.gd: extend both)
+# ---------------------------------------------------------------- perf (runtime/replay_perf.gd)
 
-func _perf_tick() -> void:
-	if _perf_ms.size() >= PERF_CAP:
-		return
-	_perf_ms.append(Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0)
-	_perf_fps.append(Performance.get_monitor(Performance.TIME_FPS))
-
-
-## Flat numeric summary ({} until something was sampled), the same keys and maths as ReplayPerf.summary().
+## Flat numeric summary of the suite's window ({} until a frame was timed): ReplayPerf.summary(), the editor's own.
 func _perf_summary() -> Dictionary:
-	if _perf_ms.is_empty():
-		return {}
-	var by_ms := _perf_ms.duplicate()
-	by_ms.sort()
-	var n := by_ms.size()
-	var total := 0.0
-	for v in by_ms:
-		total += v
-	var fps_total := 0.0
-	var fps_min := 0.0
-	for i in _perf_fps.size():
-		fps_total += _perf_fps[i]
-		if i == 0 or _perf_fps[i] < fps_min:
-			fps_min = _perf_fps[i]
-	return {
-		"frames": n,
-		"frame_ms_min": by_ms[0],
-		"frame_ms_avg": total / float(n),
-		"frame_ms_p95": by_ms[clampi(int(ceil(float(n) * 0.95)) - 1, 0, n - 1)],
-		"frame_ms_max": by_ms[n - 1],
-		"fps_min": fps_min,
-		"fps_avg": fps_total / float(maxi(1, _perf_fps.size())),
-		"memory_static_end": Performance.get_monitor(Performance.MEMORY_STATIC),
-		"memory_delta": Performance.get_monitor(Performance.MEMORY_STATIC) - _perf_mem0,
-		"orphan_delta": Performance.get_monitor(Performance.OBJECT_ORPHAN_NODE_COUNT) - _perf_orphan0,
-		"draw_calls_end": Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME),
-	}
+	return _perf.summary()
 
 
 # ---------------------------------------------------------------- input (local copy of InputCodec.build_event: extend both)
