@@ -96,6 +96,9 @@ func _push(e: Dictionary) -> void:
 	_mutex.lock()
 	_seq += 1
 	e["seq"] = _seq
+	# The frame it happened on, so a log line lines up with a step window, a burst frame or a state read (2.x).
+	e["frame"] = Engine.get_process_frames()
+	e["physics_frame"] = Engine.get_physics_frames()
 	_ring.append(e)
 	if _ring.size() > CAP:
 		_ring.pop_front()

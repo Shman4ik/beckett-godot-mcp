@@ -200,8 +200,8 @@ func _register(registry) -> void:
 	})
 	registry.register({
 		"name": "time_control",
-		"description": "Deterministic time for the RUNNING game: op=freeze | unfreeze | step (advance exactly N physics frames, optional inputs_per_frame) | step_until (run until a GDScript condition holds, then freeze) | time_scale (value 0.01..10) | status. Details: help(tool=\"time_control\").",
-		"help": "op=freeze           pause the SceneTree (the runtime keeps answering)\nop=unfreeze         resume\nop=step frames=N    from any state: pause, run exactly N unpaused physics frames, pause again. Returns frames run and physics_frames_before/after.\n  inputs_per_frame=[[ev, ev], [], [ev]]   batch i fires on tick i of the window (simulate_input wire events). A batch longer than frames grows the window.\nop=step_until condition=\"get_node('Player').position.y > 500\"   run until the expression is true, then pause. max_frames caps frames (0 = no cap), timeout_sec caps wall time (default 10, max 120). Returns the terminator (condition | max_frames | timeout) and the last condition value. An already-true condition returns at once with frames=0.\nop=time_scale value=0.25   Engine.time_scale, clamped to 0.01..10 (0 is refused: use freeze)\nop=status           paused, time_scale, physics frame counter, whether a step window is open\n\nConditions are GDScript Expressions with the current scene root as self.\n\nThis is not the editor debugger's Suspend: the game's script debugger is untouched, this pauses the SceneTree.",
+		"description": "Deterministic time for the RUNNING game: op=freeze | unfreeze | step (advance exactly N physics frames, optional inputs_per_frame) | step_until (run until a GDScript condition holds, then freeze) | burst (N frames k ticks apart: PNGs, a contact sheet, blank/static flags) | tweens (live tweens, longest-running first) | time_scale (value 0.01..10) | status. Details: help(tool=\"time_control\").",
+		"help": "op=freeze           pause the SceneTree (the runtime keeps answering)\nop=unfreeze         resume\nop=step frames=N    from any state: pause, run exactly N unpaused physics frames, pause again. Returns frames run and physics_frames_before/after.\n  inputs_per_frame=[[ev, ev], [], [ev]]   batch i fires on tick i of the window (simulate_input wire events). A batch longer than frames grows the window.\nop=step_until condition=\"get_node('Player').position.y > 500\"   run until the expression is true, then pause. max_frames caps frames (0 = no cap), timeout_sec caps wall time (default 10, max 120). Returns the terminator (condition | max_frames | timeout) and the last condition value. An already-true condition returns at once with frames=0.\nop=time_scale value=0.25   Engine.time_scale, clamped to 0.01..10 (0 is refused: use freeze)\nop=status           paused, time_scale, physics frame counter, whether a step window is open\nop=burst frames=8 every=6   freeze, then capture a frame, step `every` physics ticks, capture again: N frames in all, an animation seen as a strip. Each frame is a PNG under save_dir (default user://beckett_bursts/<time>/, at scale 0.5 of the window), with one contact sheet of them all (sheet.png: left to right, top to bottom, columns = ceil(sqrt N)). Per frame: blank (one colour, or nearly: a black or a cleared frame) and same_as_previous (its 64x64 thumbnail differs from the frame before by under 0.4%); static=true when no frame differs from the one before (a frozen animation, or a game that draws nothing new). The game stays frozen after it (unfreeze=true resumes it). frames 2..64, every 1..600, scale 0.05..1.\nop=tweens           the tweens the SceneTree processes now, longest-running first: id, elapsed (its own running time, s), running, loops_left (-1 = forever), seen_frames/seen_ms (since the probe first saw it). older_than=S keeps those running S s or more, max=N caps the list (default 40). The engine names no node a tween moves: a tween far older than any animation is the lead, and its id holds across calls.\n\nConditions are GDScript Expressions with the current scene root as self.\n\nThis is not the editor debugger's Suspend: the game's script debugger is untouched, this pauses the SceneTree.",
 		"input_schema": {"type": "object", "properties": {
 			"op": {"type": "string", "description": "freeze | unfreeze | step | step_until | time_scale | status"},
 			"frames": {"type": "integer", "description": "op=step: physics frames to run (default 1)"},
@@ -210,6 +210,11 @@ func _register(registry) -> void:
 			"max_frames": {"type": "integer", "description": "op=step_until: frame cap (0 = none)"},
 			"timeout_sec": {"type": "number", "description": "op=step_until: wall-time cap (default 10)"},
 			"value": {"type": "number", "description": "op=time_scale: 0.01..10"},
+			"every": {"type": "integer", "description": "op=burst: physics ticks between frames (default 6)"},
+			"scale": {"type": "number", "description": "op=burst: frame size against the window (default 0.5)"},
+			"save_dir": {"type": "string", "description": "op=burst: folder for the frames and sheet.png"},
+			"older_than": {"type": "number", "description": "op=tweens: only tweens running this many seconds or more"},
+			"max": {"type": "integer", "description": "op=tweens: cap on the list (default 40)"},
 		}, "required": ["op"]},
 		"handler": Callable(self, "_time_control"),
 	})
@@ -770,11 +775,19 @@ func _time_control(args: Dictionary) -> Dictionary:
 			return _tc_step(args)
 		"step_until":
 			return _tc_step_until(args)
-	return {"error": "unknown op '%s'" % op, "suggestion": "freeze | unfreeze | step | step_until | time_scale | status"}
+		"burst":
+			return _tc_burst(args)
+		"tweens":
+			var cmd := {"cmd": "tc_tweens"}
+			for k in ["older_than", "max"]:
+				if args.has(k):
+					cmd[k] = args[k]
+			return _tc_simple(cmd)
+	return {"error": "unknown op '%s'" % op, "suggestion": "freeze | unfreeze | step | step_until | burst | tweens | time_scale | status"}
 
 
 func _tc_simple(cmd: Dictionary) -> Dictionary:
-	var kind := RuntimeBridge.KIND_READ if str(cmd.get("cmd", "")) == "tc_status" else RuntimeBridge.KIND_CHANGE
+	var kind := RuntimeBridge.KIND_READ if str(cmd.get("cmd", "")) in ["tc_status", "tc_tweens"] else RuntimeBridge.KIND_CHANGE
 	var r := _send(cmd, 4000, kind)
 	if _is_error(r):
 		return r
@@ -855,6 +868,153 @@ func _tc_step_until(args: Dictionary) -> Dictionary:
 		out.erase("terminator")
 		out["warning"] = _tc_still_open(int(st.get("frames", 0)))
 	return {"json": out}
+
+
+## Thumbnail side of a burst's frame checks, and the share of it that must change for a frame to count as moved.
+const BURST_THUMB := 64
+const BURST_STILL := 0.004
+## A frame whose luminance spans less than this (0..1) is one colour: blank.
+const BURST_FLAT := 0.02
+
+
+## time_control op=burst: freeze, then N captures `every` physics ticks apart through the step clock (op=step), each
+## saved as a PNG, plus one contact sheet and the blank / unchanged flags. Ends frozen unless unfreeze=true.
+func _tc_burst(args: Dictionary) -> Dictionary:
+	var frames := clampi(int(args.get("frames", 8)), 2, 64)
+	var every := clampi(int(args.get("every", 6)), 1, 600)
+	var scale := clampf(float(args.get("scale", 0.5)), 0.05, 1.0)
+	var dir := str(args.get("save_dir", "")).strip_edges().trim_suffix("/")
+	if dir.is_empty():
+		dir = "user://beckett_bursts/%s" % Time.get_datetime_string_from_system(false, false).replace(":", "-").replace("T", "_")
+	if dir.begins_with("res://") or dir.begins_with("user://"):
+		var lerr: String = PathGuard.link_escape_error(dir + "/sheet.png")
+		if not lerr.is_empty():
+			return {"error": lerr}
+	if not DirAccess.dir_exists_absolute(dir):
+		var derr := DirAccess.make_dir_recursive_absolute(dir)
+		if derr != OK:
+			return {"error": "cannot create %s: %s" % [dir, error_string(derr)]}
+	var fr := _send({"cmd": "tc_freeze"}, 4000, RuntimeBridge.KIND_CHANGE)
+	if _is_error(fr):
+		return fr
+	var shots: Array[Image] = []
+	var rows: Array = []
+	var stopped := ""
+	for i in frames:
+		var pf := int(fr.get("physics_frames", 0))
+		if i > 0:
+			var st := _tc_step({"frames": every})
+			if _is_error(st):
+				stopped = "the step before frame %d failed: %s" % [i, str(st["error"])]
+				break
+			var stj: Dictionary = st.get("json", {})
+			if stj.has("warning"):
+				stopped = "the step before frame %d did not close: %s" % [i, str(stj["warning"])]
+				break
+			var status := _send({"cmd": "tc_status"}, 4000, RuntimeBridge.KIND_READ)
+			pf = -1 if _is_error(status) else int(status.get("physics_frames", 0))
+		var shot := _send({"cmd": "screenshot", "scale": scale, "format": "png"}, 10000, RuntimeBridge.KIND_READ)
+		if _is_error(shot):
+			stopped = "frame %d could not be captured: %s" % [i, str(shot["error"])]
+			break
+		var img := Image.new()
+		if img.load_png_from_buffer(Marshalls.base64_to_raw(str(shot.get("data", "")))) != OK or img.is_empty():
+			stopped = "frame %d came back unreadable" % i
+			break
+		var file := "%s/frame_%02d.png" % [dir, i]
+		img.save_png(file)
+		var row := {"i": i, "file": file, "physics_frame": pf, "blank": burst_blank(img)}
+		if not shots.is_empty():
+			var moved := burst_change(shots[-1], img)
+			row["change"] = snappedf(moved, 0.0001)
+			row["same_as_previous"] = moved < BURST_STILL
+		shots.append(img)
+		rows.append(row)
+	var out := {"op": "burst", "dir": dir, "frames": rows, "every": every, "captured": shots.size(), "requested": frames}
+	if not shots.is_empty():
+		var sheet := burst_sheet(shots)
+		var sheet_file := dir + "/sheet.png"
+		sheet.save_png(sheet_file)
+		out["sheet"] = sheet_file
+		out["sheet_size"] = [sheet.get_width(), sheet.get_height()]
+		out["columns"] = burst_columns(shots.size())
+	var blanks: Array = []
+	var moved_any := false
+	for r in rows:
+		if bool(r["blank"]):
+			blanks.append(int(r["i"]))
+		if r.has("same_as_previous") and not bool(r["same_as_previous"]):
+			moved_any = true
+	out["blank_frames"] = blanks
+	out["static"] = rows.size() > 1 and not moved_any
+	if not stopped.is_empty():
+		out["stopped"] = stopped
+	if CallArgs.flag(args, "unfreeze"):
+		_send({"cmd": "tc_unfreeze"}, 4000, RuntimeBridge.KIND_CHANGE)
+		out["paused"] = false
+	else:
+		out["paused"] = true
+	return {"json": out}
+
+
+## Whether a frame is one colour, or nearly (its luminance spans under BURST_FLAT): a black, a cleared or a blank frame.
+static func burst_blank(img: Image) -> bool:
+	var t := _burst_thumb(img)
+	var lo := 1.0
+	var hi := 0.0
+	for y in t.get_height():
+		for x in t.get_width():
+			var l := t.get_pixel(x, y).get_luminance()
+			lo = minf(lo, l)
+			hi = maxf(hi, l)
+	return hi - lo < BURST_FLAT
+
+
+## How much two frames differ: the mean per-channel difference of their BURST_THUMB thumbnails, 0..1.
+static func burst_change(a: Image, b: Image) -> float:
+	var ta := _burst_thumb(a)
+	var tb := _burst_thumb(b)
+	var sum := 0.0
+	for y in BURST_THUMB:
+		for x in BURST_THUMB:
+			var ca := ta.get_pixel(x, y)
+			var cb := tb.get_pixel(x, y)
+			sum += (absf(ca.r - cb.r) + absf(ca.g - cb.g) + absf(ca.b - cb.b)) / 3.0
+	return sum / float(BURST_THUMB * BURST_THUMB)
+
+
+static func _burst_thumb(img: Image) -> Image:
+	var t := img.duplicate() as Image
+	if t.is_compressed():
+		t.decompress()
+	t.convert(Image.FORMAT_RGB8)
+	t.resize(BURST_THUMB, BURST_THUMB, Image.INTERPOLATE_BILINEAR)
+	return t
+
+
+static func burst_columns(n: int) -> int:
+	return maxi(1, ceili(sqrt(float(n))))
+
+
+## The frames side by side, left to right and top to bottom, each cell the size of the first frame (the others are
+## fitted to it), with 4 px of dark gutter between them.
+static func burst_sheet(shots: Array[Image]) -> Image:
+	var cols := burst_columns(shots.size())
+	var rows := ceili(float(shots.size()) / float(cols))
+	var w := shots[0].get_width()
+	var h := shots[0].get_height()
+	var gap := 4
+	var sheet := Image.create(cols * w + (cols + 1) * gap, rows * h + (rows + 1) * gap, false, Image.FORMAT_RGBA8)
+	sheet.fill(Color(0.08, 0.08, 0.08, 1.0))
+	for i in shots.size():
+		var cell := shots[i].duplicate() as Image
+		if cell.is_compressed():
+			cell.decompress()
+		cell.convert(Image.FORMAT_RGBA8)
+		if cell.get_width() != w or cell.get_height() != h:
+			cell.resize(w, h, Image.INTERPOLATE_BILINEAR)
+		sheet.blit_rect(cell, Rect2i(0, 0, w, h), Vector2i(gap + (i % cols) * (w + gap), gap + (i / cols) * (h + gap)))
+	return sheet
 
 
 ## Poll tc_step_status until the window has closed: the closing status, or the last one while it is still open (then

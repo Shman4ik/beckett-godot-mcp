@@ -843,9 +843,13 @@ func _game_logs(args: Dictionary) -> Dictionary:
 
 func _fmt_log(e: Dictionary) -> String:
 	var ty := str(e.get("type", ""))
+	# f<process frame>/p<physics frame> t<ms>: where the line falls against a step window, a burst or a state read.
+	var at := ""
+	if e.has("frame"):
+		at = "f%d/p%d t%d " % [int(e.get("frame", 0)), int(e.get("physics_frame", 0)), int(e.get("t", 0))]
 	if ty == "print" or ty == "stderr":
-		return "[%s] %s" % [ty.to_upper(), str(e.get("text", "")).strip_edges()]
-	var head := "[%s] %s:%d" % [ty.to_upper(), str(e.get("file", "?")), int(e.get("line", 0))]
+		return "%s[%s] %s" % [at, ty.to_upper(), str(e.get("text", "")).strip_edges()]
+	var head := "%s[%s] %s:%d" % [at, ty.to_upper(), str(e.get("file", "?")), int(e.get("line", 0))]
 	var fn := str(e.get("function", ""))
 	if fn != "":
 		head += " in %s()" % fn

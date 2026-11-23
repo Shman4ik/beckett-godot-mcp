@@ -590,6 +590,8 @@ func _dispatch(msg: Dictionary) -> Dictionary:
 			return _tc_time_scale(msg)
 		"tc_status":
 			return _tc_state()
+		"tc_tweens":
+			return _tc_tweens(msg)
 		_:
 			return {"ok": false, "error": "unknown cmd"}
 
@@ -1186,6 +1188,52 @@ func _tc_step_status() -> Dictionary:
 	var out := _tc_state()
 	out.merge(clock.status(), true)
 	return out
+
+
+## The tweens the SceneTree processes now (get_processed_tweens), longest-running first: each one's own running time
+## (get_total_elapsed_time, which stands still while it is paused), whether it runs, its loops left (-1 = forever) and
+## when this probe first saw it (process frame and ms), so a tween alive far longer than any animation shows. A tween
+## names no node it moves: the engine exposes none, so the probe gives its id; older_than= (seconds) keeps only the long
+## ones, max= caps the list (default 40).
+var _tween_seen := {}  # tween instance id -> [first process frame, first ms] the probe saw it
+
+func _tc_tweens(msg: Dictionary) -> Dictionary:
+	var tree := get_tree()
+	if tree == null:
+		return {"ok": false, "error": "no scene tree"}
+	return tweens_report(tree, msg, _tween_seen)
+
+
+## The probe itself, on any tree; `seen` (tween id -> [frame, ms]) is updated in place to the tweens alive now.
+static func tweens_report(tree: SceneTree, msg: Dictionary, seen: Dictionary) -> Dictionary:
+	var older := maxf(0.0, float(msg.get("older_than", 0.0)))
+	var cap := clampi(int(msg.get("max", 40)), 1, 500)
+	var frame := Engine.get_process_frames()
+	var now := Time.get_ticks_msec()
+	var alive := {}
+	var rows: Array = []
+	for tw: Tween in tree.get_processed_tweens():
+		if tw == null or not is_instance_valid(tw):
+			continue
+		var id := tw.get_instance_id()
+		var first: Array = seen.get(id, [frame, now])
+		alive[id] = first
+		rows.append({"id": id, "elapsed": snappedf(tw.get_total_elapsed_time(), 0.001), "running": tw.is_running(),
+			"valid": tw.is_valid(), "loops_left": tw.get_loops_left(), "seen_frames": frame - int(first[0]),
+			"seen_ms": now - int(first[1])})
+	seen.clear()  # forget the tweens that are gone
+	seen.merge(alive)
+	rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a["elapsed"]) > float(b["elapsed"]))
+	var kept: Array = []
+	var long := 0
+	for r in rows:
+		if float(r["elapsed"]) < older:
+			continue
+		long += 1
+		if kept.size() < cap:
+			kept.append(r)
+	return {"ok": true, "paused": tree.paused, "time_scale": Engine.time_scale, "physics_frames": Engine.get_physics_frames(),
+		"tweens": kept, "count": rows.size(), "matching": long, "older_than": older, "frame": frame}
 
 
 ## Set Engine.time_scale. Clamp to [0.01, 10.0]; a value of 0 is rejected (freeze is the

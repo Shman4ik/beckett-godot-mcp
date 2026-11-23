@@ -102,6 +102,10 @@ func _init() -> void:
 	_g("call_args", _t_call_args())
 	_g("node_path_values", _t_node_path_values())
 	_g("error_echo", _t_error_echo())
+	_g("log_frames", _t_log_frames())
+	_g("tween_probe", _t_tween_probe())
+	if ResourceLoader.exists("res://addons/beckett/tools/runtime_tools.gd"):
+		_g("burst", _t_burst())
 	_g("class_name_mask", _t_class_name_mask())
 	_g("validate_as_file", _t_validate_as_file())
 	if ResourceLoader.exists(_PLAYTEST_TOOLS_PATH):
@@ -3054,6 +3058,103 @@ func _t_error_echo() -> bool:
 	var tj: Dictionary = s._tool_result({"json": {"result": 1}, "engine_errors": [{"severity": "error", "message": "x"}]})
 	_ok((tj["structuredContent"] as Dictionary).has("result") and (tj["structuredContent"] as Dictionary).has("engine_errors"), "engine_errors merge beside a json payload")
 	s.free()
+	return true
+
+
+# ---------------------------------------------------------------- eyes on animations (frames, tweens, bursts)
+
+func _t_log_frames() -> bool:
+	print("[unit] game_logs: every entry carries the process and physics frame it was logged on")
+	var sink = GameLogSink.new()
+	sink._on_error("f", "res://a.gd", 3, "E", "late tween", 0, [])
+	sink._on_message("a print", false)
+	var snap: Dictionary = sink.snapshot({"level": "all"})
+	var entries: Array = snap.get("entries", [])
+	_ok(entries.size() == 2 and entries.all(func(e: Dictionary) -> bool: return e.has("frame") and e.has("physics_frame")), "both kinds of entry are stamped with frame and physics_frame")
+	_ok(int(entries[0]["frame"]) == Engine.get_process_frames(), "the stamp is the frame it was logged on")
+	var Obs = load("res://addons/beckett/tools/runtime_observe_tools.gd")
+	var line: String = Obs.new()._fmt_log(entries[0])
+	_ok(line.begins_with("f%d/p%d t" % [int(entries[0]["frame"]), int(entries[0]["physics_frame"])]) and line.contains("late tween"), "the formatted line leads with f<frame>/p<physics> t<ms>: %s" % line.left(80))
+	_ok(not Obs.new()._fmt_log({"type": "print", "text": "old"}).begins_with("f"), "an entry from an older game, with no frame, reads as before")
+	return true
+
+
+func _t_tween_probe() -> bool:
+	print("[unit] time_control op=tweens: the tweens the tree processes, longest-running first")
+	var tw := create_tween()
+	tw.tween_interval(30.0)
+	var seen := {}
+	var all: Dictionary = MCPRuntime.tweens_report(self, {}, seen)
+	var mine: Array = (all.get("tweens", []) as Array).filter(func(r: Dictionary) -> bool: return int(r["id"]) == tw.get_instance_id())
+	_ok(bool(all.get("ok", false)) and mine.size() == 1, "a live tween is listed by its id (%d of %d)" % [mine.size(), int(all.get("count", 0))])
+	if mine.size() == 1:
+		var row: Dictionary = mine[0]
+		_ok(row.has("elapsed") and row.has("running") and row.has("loops_left") and row.has("seen_frames") and row.has("seen_ms"), "a row says how long it has run, whether it runs, its loops and since when it was seen")
+	_ok(seen.has(tw.get_instance_id()), "the probe remembers when it first saw each tween")
+	var old: Dictionary = MCPRuntime.tweens_report(self, {"older_than": 100.0}, seen)
+	_ok((old.get("tweens", []) as Array).is_empty() and int(old.get("matching", -1)) == 0, "older_than leaves out a tween that has not run that long")
+	_ok((MCPRuntime.tweens_report(self, {"max": 1}, seen).get("tweens", []) as Array).size() <= 1, "max caps the list")
+	tw.kill()
+	return true
+
+
+func _burst_png(color: Color, mark: bool = false) -> String:
+	var img := Image.create(80, 60, false, Image.FORMAT_RGBA8)
+	img.fill(color)
+	if mark:
+		img.fill_rect(Rect2i(10, 10, 30, 30), Color(1, 1, 1))
+	return Marshalls.raw_to_base64(img.save_png_to_buffer())
+
+
+func _t_burst() -> bool:
+	print("[unit] time_control op=burst: frames through the step clock, a contact sheet, blank and static flags")
+	var RT = load("res://addons/beckett/tools/runtime_tools.gd")
+	var black := Image.create(64, 64, false, Image.FORMAT_RGBA8)
+	black.fill(Color(0, 0, 0))
+	var marked := black.duplicate() as Image
+	marked.fill_rect(Rect2i(8, 8, 24, 24), Color(1, 1, 1))
+	_ok(RT.burst_blank(black) and not RT.burst_blank(marked), "a one-colour frame is blank, a frame with a figure on it is not")
+	_ok(RT.burst_change(black, black) == 0.0 and RT.burst_change(black, marked) > 0.1, "two equal frames differ by 0, a changed one by its share")
+	_ok(RT.burst_columns(8) == 3 and RT.burst_columns(9) == 3 and RT.burst_columns(2) == 2, "the sheet's columns are ceil(sqrt N)")
+	var cells: Array[Image] = [black, marked, black]
+	var sheet: Image = RT.burst_sheet(cells)
+	_ok(sheet.get_width() == 2 * 64 + 3 * 4 and sheet.get_height() == 2 * 64 + 3 * 4, "a sheet of 3 lays them 2 by 2 with 4 px gutters (%dx%d)" % [sheet.get_width(), sheet.get_height()])
+	var sb := _SeqBridge.new()
+	var fs := _FakeServer.new()
+	fs.bridge = sb
+	var drive = RT.new()
+	drive.server = fs
+	var dir := "user://beckett_unit_burst"
+	sb.replies = {
+		"tc_freeze": {"ok": true, "paused": true, "physics_frames": 100},
+		"tc_step": {"ok": true, "frames_requested": 6},
+		"tc_step_status": {"ok": true, "in_step": false, "frames": 6, "paused": true},
+		"tc_status": [{"ok": true, "physics_frames": 106}, {"ok": true, "physics_frames": 112}],
+		"screenshot": [{"ok": true, "data": _burst_png(Color(0, 0, 0))}, {"ok": true, "data": _burst_png(Color(0.2, 0.2, 0.2), true)}, {"ok": true, "data": _burst_png(Color(0.2, 0.2, 0.2), true)}],
+	}
+	var r: Dictionary = drive._time_control({"op": "burst", "frames": 3, "every": 6, "save_dir": dir})
+	var j: Dictionary = r.get("json", {})
+	var rows: Array = j.get("frames", [])
+	_ok(int(j.get("captured", 0)) == 3 and rows.size() == 3, "three frames captured (%s)" % str(r).left(120))
+	if rows.size() == 3:
+		_ok(bool(rows[0]["blank"]) and not bool(rows[1]["blank"]) and j.get("blank_frames", []) == [0], "the black frame is flagged blank, the others not")
+		_ok(not bool(rows[1]["same_as_previous"]) and bool(rows[2]["same_as_previous"]) and not bool(j.get("static", true)), "a frame that moved is not the same as the one before, a repeated one is, and the burst is not static")
+		_ok(int(rows[0]["physics_frame"]) == 100 and int(rows[2]["physics_frame"]) == 112, "each frame says its physics frame")
+		_ok(FileAccess.file_exists(str(rows[1]["file"])) and FileAccess.file_exists(str(j.get("sheet", ""))), "every frame and the sheet are files")
+	_ok(sb.sent.count("tc_step") == 2 and sb.sent.count("screenshot") == 3 and bool(j.get("paused", false)), "N frames take N-1 steps through the step clock and leave the game frozen")
+	sb.clear()
+	sb.replies["screenshot"] = {"ok": true, "data": _burst_png(Color(0.3, 0.3, 0.3), true)}
+	sb.replies["tc_status"] = {"ok": true, "physics_frames": 106}
+	sb.replies["tc_unfreeze"] = {"ok": true, "paused": false}
+	var still: Dictionary = drive._time_control({"op": "burst", "frames": 4, "every": 2, "save_dir": dir, "unfreeze": true}).get("json", {})
+	_ok(bool(still.get("static", false)) and not bool(still.get("paused", true)) and sb.sent.has("tc_unfreeze"), "four equal frames: static, and unfreeze=true resumes the game")
+	sb.clear()
+	sb.replies["screenshot"] = {"ok": false, "error": "no viewport texture (headless / no RHI?)"}
+	var failed: Dictionary = drive._time_control({"op": "burst", "frames": 3, "save_dir": dir}).get("json", {})
+	_ok(str(failed.get("stopped", "")).contains("frame 0 could not be captured") and int(failed.get("captured", -1)) == 0 and not failed.has("sheet"), "a capture that fails stops the burst and says which frame")
+	for f in DirAccess.get_files_at(dir):
+		DirAccess.remove_absolute(dir + "/" + f)
+	DirAccess.remove_absolute(dir)
 	return true
 
 
