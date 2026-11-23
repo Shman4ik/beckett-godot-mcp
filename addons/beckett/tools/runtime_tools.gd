@@ -201,7 +201,7 @@ func _register(registry) -> void:
 	registry.register({
 		"name": "time_control",
 		"description": "Deterministic time for the RUNNING game: op=freeze | unfreeze | step (advance exactly N physics frames, optional inputs_per_frame) | step_until (run until a GDScript condition holds, then freeze) | burst (N frames k ticks apart: PNGs, a contact sheet, blank/static flags) | tweens (live tweens, longest-running first) | time_scale (value 0.01..10) | status. Details: help(tool=\"time_control\").",
-		"help": "op=freeze           pause the SceneTree (the runtime keeps answering)\nop=unfreeze         resume\nop=step frames=N    from any state: pause, run exactly N unpaused physics frames, pause again. Returns frames run and physics_frames_before/after.\n  inputs_per_frame=[[ev, ev], [], [ev]]   batch i fires on tick i of the window (simulate_input wire events). A batch longer than frames grows the window.\nop=step_until condition=\"get_node('Player').position.y > 500\"   run until the expression is true, then pause. max_frames caps frames (0 = no cap), timeout_sec caps wall time (default 10, max 120). Returns the terminator (condition | max_frames | timeout) and the last condition value. An already-true condition returns at once with frames=0.\nop=time_scale value=0.25   Engine.time_scale, clamped to 0.01..10 (0 is refused: use freeze)\nop=status           paused, time_scale, physics frame counter, whether a step window is open\nop=burst frames=8 every=6   freeze, then capture a frame, step `every` physics ticks, capture again: N frames in all, an animation seen as a strip. Each frame is a PNG under save_dir (default user://beckett_bursts/<time>/, at scale 0.5 of the window), with one contact sheet of them all (sheet.png: left to right, top to bottom, columns = ceil(sqrt N)). Per frame: blank (one colour, or nearly: a black or a cleared frame) and same_as_previous (its 64x64 thumbnail differs from the frame before by under 0.4%); static=true when no frame differs from the one before (a frozen animation, or a game that draws nothing new). The game stays frozen after it (unfreeze=true resumes it). frames 2..64, every 1..600, scale 0.05..1.\nop=tweens           the tweens the SceneTree processes now, longest-running first: id, elapsed (its own running time, s), running, loops_left (-1 = forever), seen_frames/seen_ms (since the probe first saw it). older_than=S keeps those running S s or more, max=N caps the list (default 40). The engine names no node a tween moves: a tween far older than any animation is the lead, and its id holds across calls.\n\nConditions are GDScript Expressions with the current scene root as self.\n\nThis is not the editor debugger's Suspend: the game's script debugger is untouched, this pauses the SceneTree.",
+		"help": "op=freeze           pause the SceneTree (the runtime keeps answering)\nop=unfreeze         resume\nop=step frames=N    from any state: pause, run exactly N unpaused physics frames, pause again. Returns frames run and physics_frames_before/after.\n  inputs_per_frame=[[ev, ev], [], [ev]]   batch i fires on tick i of the window (simulate_input wire events). A batch longer than frames grows the window.\nop=step_until condition=\"get_node('Player').position.y > 500\"   run until the expression is true, then pause. max_frames caps frames (0 = no cap), timeout_sec caps wall time (default 10, max 120). Returns the terminator (condition | max_frames | timeout) and the last condition value. An already-true condition returns at once with frames=0.\nop=time_scale value=0.25   Engine.time_scale, clamped to 0.01..10 (0 is refused: use freeze)\nop=status           paused, time_scale, physics frame counter, whether a step window is open\nop=burst frames=8 every=6   freeze, then capture a frame, step `every` physics ticks, capture again: N frames in all, an animation seen as a strip. Each frame is a PNG under save_dir (default user://beckett_bursts/<time>/, at scale 0.5 of the window), with one contact sheet of them all (sheet.png: left to right, top to bottom, columns = ceil(sqrt N)). Per frame: ticks (physics ticks run since frame 0), physics_frame (the engine counter, which runs on while frozen: it lines a frame up with game_logs), blank (one colour, or nearly: a black or a cleared frame) and same_as_previous (its 64x64 thumbnail differs from the frame before by under 0.4%); static=true when no frame differs from the one before (a frozen animation, or a game that draws nothing new). The game stays frozen after it (unfreeze=true resumes it). frames 2..64, every 1..600, scale 0.05..1.\nop=tweens           the tweens the SceneTree processes now, longest-running first: id, elapsed (its own running time, s), running, loops_left (-1 = forever), seen_frames/seen_ms (since the probe first saw it). older_than=S keeps those running S s or more, max=N caps the list (default 40). The engine names no node a tween moves: a tween far older than any animation is the lead, and its id holds across calls.\n\nConditions are GDScript Expressions with the current scene root as self.\n\nThis is not the editor debugger's Suspend: the game's script debugger is untouched, this pauses the SceneTree.",
 		"input_schema": {"type": "object", "properties": {
 			"op": {"type": "string", "description": "freeze | unfreeze | step | step_until | time_scale | status"},
 			"frames": {"type": "integer", "description": "op=step: physics frames to run (default 1)"},
@@ -900,6 +900,7 @@ func _tc_burst(args: Dictionary) -> Dictionary:
 	var shots: Array[Image] = []
 	var rows: Array = []
 	var stopped := ""
+	var ticks := 0
 	for i in frames:
 		var pf := int(fr.get("physics_frames", 0))
 		if i > 0:
@@ -911,6 +912,7 @@ func _tc_burst(args: Dictionary) -> Dictionary:
 			if stj.has("warning"):
 				stopped = "the step before frame %d did not close: %s" % [i, str(stj["warning"])]
 				break
+			ticks += int(stj.get("frames_stepped", every))
 			var status := _send({"cmd": "tc_status"}, 4000, RuntimeBridge.KIND_READ)
 			pf = -1 if _is_error(status) else int(status.get("physics_frames", 0))
 		var shot := _send({"cmd": "screenshot", "scale": scale, "format": "png"}, 10000, RuntimeBridge.KIND_READ)
@@ -923,7 +925,9 @@ func _tc_burst(args: Dictionary) -> Dictionary:
 			break
 		var file := "%s/frame_%02d.png" % [dir, i]
 		img.save_png(file)
-		var row := {"i": i, "file": file, "physics_frame": pf, "blank": burst_blank(img)}
+		# ticks: the physics ticks the game ran since frame 0 (the steps); physics_frame: the engine's counter, which also
+		# counts while frozen (the captures take a while), to line a frame up with game_logs' p<frame>.
+		var row := {"i": i, "file": file, "ticks": ticks, "physics_frame": pf, "blank": burst_blank(img)}
 		if not shots.is_empty():
 			var moved := burst_change(shots[-1], img)
 			row["change"] = snappedf(moved, 0.0001)

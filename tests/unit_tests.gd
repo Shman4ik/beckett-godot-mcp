@@ -3140,6 +3140,7 @@ func _t_burst() -> bool:
 		_ok(bool(rows[0]["blank"]) and not bool(rows[1]["blank"]) and j.get("blank_frames", []) == [0], "the black frame is flagged blank, the others not")
 		_ok(not bool(rows[1]["same_as_previous"]) and bool(rows[2]["same_as_previous"]) and not bool(j.get("static", true)), "a frame that moved is not the same as the one before, a repeated one is, and the burst is not static")
 		_ok(int(rows[0]["physics_frame"]) == 100 and int(rows[2]["physics_frame"]) == 112, "each frame says its physics frame")
+		_ok(int(rows[0]["ticks"]) == 0 and int(rows[1]["ticks"]) == 6 and int(rows[2]["ticks"]) == 12, "...and the ticks the game ran since the first frame")
 		_ok(FileAccess.file_exists(str(rows[1]["file"])) and FileAccess.file_exists(str(j.get("sheet", ""))), "every frame and the sheet are files")
 	_ok(sb.sent.count("tc_step") == 2 and sb.sent.count("screenshot") == 3 and bool(j.get("paused", false)), "N frames take N-1 steps through the step clock and leave the game frozen")
 	sb.clear()
