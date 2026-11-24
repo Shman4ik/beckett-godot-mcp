@@ -793,7 +793,8 @@ static func audit(vp: Viewport, tree_root: Node, scene_root: Node, scope: Node, 
 	var cap := maxi(1, int(msg.get("max", 100)))
 	var interactive: Array = []
 	var texty: Array = []
-	_audit_collect(scope, tree_root, interactive, texty)
+	var blockers: Array = []
+	_audit_collect(scope, tree_root, interactive, texty, blockers)
 	var issues: Array = []
 	var vr := vp.get_visible_rect()
 	# Every rect in the root's GUI space, where the controls are drawn (one route per
@@ -809,6 +810,16 @@ static func audit(vp: Viewport, tree_root: Node, scene_root: Node, scope: Node, 
 		var rt := _route_cached(routes, rc.get_viewport(), scene_root)
 		rects.append(((rt["xf"] as Transform2D) * rc.get_global_transform_with_canvas()) * Rect2(Vector2.ZERO, rc.size))
 		here.append(rt["vp"] == vp and not bool(rt["direct"]))
+	# Controls that take the click and are no buttons (a story's backdrop, a modal's panel): a control wholly under
+	# one drawn above it gets no click, so its overlaps are not the player's.
+	var blocker_rects: Array = []
+	for bn in blockers:
+		var bc := bn as Control
+		var brt := _route_cached(routes, bc.get_viewport(), scene_root)
+		blocker_rects.append(((brt["xf"] as Transform2D) * bc.get_global_transform_with_canvas()) * Rect2(Vector2.ZERO, bc.size))
+	var covered: Array = []
+	for ci2 in interactive.size():
+		covered.append(_covered(interactive[ci2] as Control, rects[ci2], blockers, blocker_rects, tree_root))
 	for ci in interactive.size():
 		if issues.size() >= cap:
 			break
@@ -833,13 +844,13 @@ static func audit(vp: Viewport, tree_root: Node, scene_root: Node, scope: Node, 
 			break
 		var a := interactive[i] as Control
 		var ra: Rect2 = rects[i]
-		if ra.size.x < 1.0 or ra.size.y < 1.0 or not bool(here[i]):
+		if ra.size.x < 1.0 or ra.size.y < 1.0 or not bool(here[i]) or bool(covered[i]):
 			continue
 		for j in range(i + 1, interactive.size()):
 			if issues.size() >= cap:
 				break
 			var b := interactive[j] as Control
-			if a.is_ancestor_of(b) or b.is_ancestor_of(a) or not bool(here[j]):
+			if a.is_ancestor_of(b) or b.is_ancestor_of(a) or not bool(here[j]) or bool(covered[j]):
 				continue
 			if _host_window(a, tree_root) != _host_window(b, tree_root):
 				continue
@@ -958,7 +969,7 @@ static func _wrapped_lines(t: Control) -> Vector3:
 	return Vector3(added, chars, lines)
 
 
-static func _audit_collect(n: Node, tree_root: Node, interactive: Array, texty: Array) -> void:
+static func _audit_collect(n: Node, tree_root: Node, interactive: Array, texty: Array, blockers: Array = []) -> void:
 	if n is CanvasItem and not (n as CanvasItem).visible:
 		return
 	if n is Window and n != tree_root and not (n as Window).visible:
@@ -968,10 +979,39 @@ static func _audit_collect(n: Node, tree_root: Node, interactive: Array, texty: 
 		if c.is_visible_in_tree():
 			if _is_interactive(c):
 				interactive.append(c)
+			elif c.mouse_filter == Control.MOUSE_FILTER_STOP and c.modulate.a > 0.01 and c.size.x >= 1.0 and c.size.y >= 1.0:
+				blockers.append(c)
 			if (c is Label or c is BaseButton or c is RichTextLabel) and _text_of(c) != "":
 				texty.append(c)
 	for child in n.get_children():
-		_audit_collect(child, tree_root, interactive, texty)
+		_audit_collect(child, tree_root, interactive, texty, blockers)
+
+
+## True when a control that takes the click lies over the whole of c, drawn above it: a higher CanvasLayer, or the
+## same layer and later in the tree, and not one of c's ancestors (a panel holding its button).
+static func _covered(c: Control, r: Rect2, blockers: Array, blocker_rects: Array, tree_root: Node) -> bool:
+	var layer := _layer_of(c)
+	for k in blockers.size():
+		var b := blockers[k] as Control
+		if b.is_ancestor_of(c) or _host_window(b, tree_root) != _host_window(c, tree_root):
+			continue
+		if not (blocker_rects[k] as Rect2).encloses(r):
+			continue
+		var bl := _layer_of(b)
+		if bl > layer or (bl == layer and b.is_greater_than(c)):
+			return true
+	return false
+
+
+static func _layer_of(n: Node) -> int:
+	var a := n.get_parent()
+	while a != null:
+		if a is CanvasLayer:
+			return (a as CanvasLayer).layer
+		if a is Window:
+			return 0
+		a = a.get_parent()
+	return 0
 
 
 static func _host_window(c: Control, tree_root: Node) -> Node:

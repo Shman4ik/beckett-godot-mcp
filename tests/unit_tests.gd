@@ -2123,6 +2123,42 @@ func _t_ui_inspect() -> bool:
 	for is_ in au.get("issues", []):
 		found[str((is_ as Dictionary).get("type", ""))] = true
 	_ok(found.has("overlap"), "audit finds the overlapping pair")
+	# A pair under a backdrop drawn above them (a story's ColorRect over the screen behind) takes no click: no overlap.
+	var hidden := Control.new()
+	hidden.name = "HiddenStage"
+	hidden.size = Vector2(60, 60)
+	root.add_child(hidden)
+	var ha := TextureButton.new()
+	ha.name = "HA"
+	ha.position = Vector2(2, 30)
+	ha.size = Vector2(20, 12)
+	hidden.add_child(ha)
+	var hb := TextureButton.new()
+	hb.name = "HB"
+	hb.position = Vector2(12, 34)
+	hb.size = Vector2(20, 12)
+	hidden.add_child(hb)
+	var curtain := ColorRect.new()
+	curtain.name = "Curtain"
+	curtain.position = Vector2(0, 28)
+	curtain.size = Vector2(40, 20)
+	hidden.add_child(curtain)
+	await process_frame
+	var au_h: Dictionary = UiInspect.audit(root, root, hidden, hidden, {})
+	var hidden_overlaps: Array = []
+	for is_ in au_h.get("issues", []):
+		if str((is_ as Dictionary).get("type", "")) == "overlap":
+			hidden_overlaps.append(is_)
+	_ok(hidden_overlaps.is_empty(), "audit leaves out an overlap wholly under a control drawn above that takes the click: %s" % str(hidden_overlaps))
+	hidden.move_child(curtain, 0)  # now drawn below the buttons: the overlap is the player's again
+	await process_frame
+	var au_h2: Dictionary = UiInspect.audit(root, root, hidden, hidden, {})
+	var back := false
+	for is_ in au_h2.get("issues", []):
+		if str((is_ as Dictionary).get("type", "")) == "overlap":
+			back = true
+	_ok(back, "audit still finds the pair when the backdrop is drawn under it")
+	hidden.queue_free()
 	_ok(found.has("offscreen"), "audit finds the offscreen control")
 	var off_paths: Array = []
 	for is_ in au.get("issues", []):
