@@ -864,6 +864,14 @@ static func audit(vp: Viewport, tree_root: Node, scene_root: Node, scope: Node, 
 		if issues.size() >= cap:
 			break
 		var t := n2 as Control
+		# Wrapped text squeezed into a column a letter or two wide (a panel that lost its width): the words break
+		# into many short lines. Lines the text breaks itself (newlines) do not count.
+		var wrapped := _wrapped_lines(t)
+		if wrapped.x >= 3 and wrapped.y < 3.0 * wrapped.z:
+			issues.append({"type": "text_column", "path": path_of(t, scene_root), "rect": _r4(Rect2(t.global_position, t.size)),
+				"lines": wrapped.z, "detail": "text wraps into %d lines of about %.1f characters each: its control is %d px wide" % [wrapped.z, wrapped.y / maxf(1.0, wrapped.z), roundi(t.size.x)]})
+		if t is RichTextLabel:
+			continue  # bbcode text is not measured as one string
 		if t is Label and (t as Label).autowrap_mode != TextServer.AUTOWRAP_OFF:
 			continue  # wrapping labels grow down by design
 		var txt := _text_of(t)
@@ -933,6 +941,23 @@ static func audit(vp: Viewport, tree_root: Node, scene_root: Node, scope: Node, 
 		"truncated": issues.size() >= cap}
 
 
+## For wrapping text: (lines the wrap added, visible characters, lines drawn); zero when it does not wrap.
+static func _wrapped_lines(t: Control) -> Vector3:
+	var lines := 0
+	var txt := ""
+	if t is Label and (t as Label).autowrap_mode != TextServer.AUTOWRAP_OFF:
+		lines = (t as Label).get_line_count()
+		txt = (t as Label).text
+	elif t is RichTextLabel and (t as RichTextLabel).autowrap_mode != TextServer.AUTOWRAP_OFF:
+		lines = (t as RichTextLabel).get_line_count()
+		txt = (t as RichTextLabel).get_parsed_text()
+	else:
+		return Vector3.ZERO
+	var chars := txt.replace(" ", "").replace("\n", "").replace("\t", "").length()
+	var added := lines - (txt.count("\n") + 1)
+	return Vector3(added, chars, lines)
+
+
 static func _audit_collect(n: Node, tree_root: Node, interactive: Array, texty: Array) -> void:
 	if n is CanvasItem and not (n as CanvasItem).visible:
 		return
@@ -943,7 +968,7 @@ static func _audit_collect(n: Node, tree_root: Node, interactive: Array, texty: 
 		if c.is_visible_in_tree():
 			if _is_interactive(c):
 				interactive.append(c)
-			if (c is Label or c is BaseButton) and _text_of(c) != "":
+			if (c is Label or c is BaseButton or c is RichTextLabel) and _text_of(c) != "":
 				texty.append(c)
 	for child in n.get_children():
 		_audit_collect(child, tree_root, interactive, texty)

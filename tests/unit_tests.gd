@@ -2102,6 +2102,20 @@ func _t_ui_inspect() -> bool:
 	deep_btn.position = Vector2(0, 350)
 	deep_btn.size = Vector2(10, 10)
 	tall.add_child(deep_btn)
+	var column := Label.new()
+	column.name = "Column"  # a wrapping label squeezed to a letter's width: one letter per line
+	column.text = "squeezed legend"
+	column.autowrap_mode = TextServer.AUTOWRAP_ARBITRARY
+	column.position = Vector2(2, 2)
+	column.size = Vector2(9, 60)
+	stage.add_child(column)
+	var roomy := Label.new()
+	roomy.name = "Roomy"  # wraps into two lines of whole words: fine
+	roomy.text = "a b"
+	roomy.autowrap_mode = TextServer.AUTOWRAP_WORD
+	roomy.position = Vector2(2, 2)
+	roomy.size = Vector2(60, 20)
+	stage.add_child(roomy)
 	await process_frame
 	var au: Dictionary = UiInspect.audit(root, root, stage, stage, {"touch_min": 15})
 	_ok(bool(au.get("ok", false)), "audit ok")
@@ -2114,7 +2128,12 @@ func _t_ui_inspect() -> bool:
 	for is_ in au.get("issues", []):
 		if str((is_ as Dictionary).get("type", "")) == "offscreen":
 			off_paths.append(str((is_ as Dictionary).get("path", "")))
-	_ok(not str(off_paths).contains("Deep"), "audit leaves out a control scrolled out inside an on-screen ScrollContainer: %s" % str(off_paths))
+	var columns: Array = []
+	for is_ in au.get("issues", []):
+		if str((is_ as Dictionary).get("type", "")) == "text_column":
+			columns.append(str((is_ as Dictionary).get("path", "")))
+	_ok(columns == ["Column"], "audit flags wrapped text squeezed into a column, and not a label wrapping whole words: %s" % str(columns))
+	_ok(not str(off_paths).contains("Deep"),"audit leaves out a control scrolled out inside an on-screen ScrollContainer: %s" % str(off_paths))
 	_ok(found.has("text_overflow"), "audit finds the trimmed label (font-measured, not min-size)")
 	_ok(found.has("small_target"), "audit flags sub-touch_min targets")
 	_ok(found.has("mouse_only"), "audit flags focus_mode NONE buttons")
