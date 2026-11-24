@@ -2123,6 +2123,34 @@ func _t_ui_inspect() -> bool:
 	for is_ in au.get("issues", []):
 		found[str((is_ as Dictionary).get("type", ""))] = true
 	_ok(found.has("overlap"), "audit finds the overlapping pair")
+	# A focusable label with no text and no height (a summary line with nothing to say) is no zero_size; with text it is.
+	var flat := Control.new()
+	flat.name = "FlatStage"
+	flat.size = Vector2(60, 60)
+	root.add_child(flat)
+	var empty_rt := RichTextLabel.new()
+	empty_rt.name = "EmptySummary"
+	empty_rt.focus_mode = Control.FOCUS_ALL
+	empty_rt.position = Vector2(2, 2)
+	empty_rt.size = Vector2(40, 0)
+	flat.add_child(empty_rt)
+	var full_rt := RichTextLabel.new()
+	full_rt.name = "SquashedSummary"
+	full_rt.focus_mode = Control.FOCUS_ALL
+	full_rt.text = "a line squashed flat"
+	full_rt.position = Vector2(2, 20)
+	full_rt.size = Vector2(40, 0)
+	flat.add_child(full_rt)
+	await process_frame
+	empty_rt.size = Vector2(40, 0)
+	full_rt.size = Vector2(40, 0)
+	var au_f: Dictionary = UiInspect.audit(root, root, flat, flat, {})
+	var zero_paths: Array = []
+	for is_ in au_f.get("issues", []):
+		if str((is_ as Dictionary).get("type", "")) == "zero_size":
+			zero_paths.append(str((is_ as Dictionary).get("path", "")))
+	_ok(zero_paths == ["SquashedSummary"], "audit leaves out an empty label with no height and keeps one whose text is squashed: %s" % str(zero_paths))
+	flat.queue_free()
 	# A pair under a backdrop drawn above them (a story's ColorRect over the screen behind) takes no click: no overlap.
 	var hidden := Control.new()
 	hidden.name = "HiddenStage"

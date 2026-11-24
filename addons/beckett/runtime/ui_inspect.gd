@@ -827,8 +827,11 @@ static func audit(vp: Viewport, tree_root: Node, scene_root: Node, scope: Node, 
 		var r: Rect2 = rects[ci]
 		var p := path_of(c, scene_root)
 		if r.size.x < 1.0 or r.size.y < 1.0:
-			issues.append({"type": "zero_size", "path": p, "rect": _r4(r),
-				"detail": "visible interactive control with a degenerate rect"})
+			# An empty label that takes no room hides nothing (a summary line with nothing to say); a label whose
+			# text is squashed to nothing still counts.
+			if not ((c is Label or c is RichTextLabel) and _text_of(c).strip_edges() == ""):
+				issues.append({"type": "zero_size", "path": p, "rect": _r4(r),
+					"detail": "visible interactive control with a degenerate rect"})
 		elif bool(here[ci]) and not vr.intersects(r) and not _scrolled_out(c, routes, scene_root, vr):
 			issues.append({"type": "offscreen", "path": p, "rect": _r4(r),
 				"detail": "visible interactive control entirely outside the viewport"})
