@@ -2089,6 +2089,19 @@ func _t_ui_inspect() -> bool:
 	mo.focus_mode = Control.FOCUS_NONE
 	mo.position = Vector2(2, 44)
 	stage.add_child(mo)
+	var scroll := ScrollContainer.new()
+	scroll.name = "Scroll"
+	scroll.position = Vector2(40, 40)
+	scroll.size = Vector2(20, 20)
+	stage.add_child(scroll)
+	var tall := Control.new()
+	tall.custom_minimum_size = Vector2(10, 400)
+	scroll.add_child(tall)
+	var deep_btn := Button.new()
+	deep_btn.name = "Deep"  # scrolled out of view inside an on-screen ScrollContainer: reachable, not offscreen
+	deep_btn.position = Vector2(0, 350)
+	deep_btn.size = Vector2(10, 10)
+	tall.add_child(deep_btn)
 	await process_frame
 	var au: Dictionary = UiInspect.audit(root, root, stage, stage, {"touch_min": 15})
 	_ok(bool(au.get("ok", false)), "audit ok")
@@ -2097,6 +2110,11 @@ func _t_ui_inspect() -> bool:
 		found[str((is_ as Dictionary).get("type", ""))] = true
 	_ok(found.has("overlap"), "audit finds the overlapping pair")
 	_ok(found.has("offscreen"), "audit finds the offscreen control")
+	var off_paths: Array = []
+	for is_ in au.get("issues", []):
+		if str((is_ as Dictionary).get("type", "")) == "offscreen":
+			off_paths.append(str((is_ as Dictionary).get("path", "")))
+	_ok(not str(off_paths).contains("Deep"), "audit leaves out a control scrolled out inside an on-screen ScrollContainer: %s" % str(off_paths))
 	_ok(found.has("text_overflow"), "audit finds the trimmed label (font-measured, not min-size)")
 	_ok(found.has("small_target"), "audit flags sub-touch_min targets")
 	_ok(found.has("mouse_only"), "audit flags focus_mode NONE buttons")

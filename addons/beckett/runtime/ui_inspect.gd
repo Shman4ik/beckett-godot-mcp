@@ -767,6 +767,20 @@ static func _digit(img: Image, at: Vector2i, ch: String) -> void:
 				img.fill_rect(Rect2i(at + Vector2i(rx * 2, ry * 2), Vector2i(2, 2)), TAG_FG)
 
 
+## Is the control off screen only because a ScrollContainer on screen holds it scrolled out of view? A player
+## scrolls to it, so ui_audit does not call it offscreen.
+static func _scrolled_out(c: Control, routes: Dictionary, scene_root: Node, vr: Rect2) -> bool:
+	var a := c.get_parent()
+	while a != null:
+		if a is ScrollContainer and (a as Control).is_visible_in_tree():
+			var sc := a as Control
+			var rt := _route_cached(routes, sc.get_viewport(), scene_root)
+			var sr: Rect2 = ((rt["xf"] as Transform2D) * sc.get_global_transform_with_canvas()) * Rect2(Vector2.ZERO, sc.size)
+			return vr.intersects(sr)
+		a = a.get_parent()
+	return false
+
+
 ## ---- ui_audit: deterministic layout QA (P1) -----------------------------------
 
 ## Structured checks vision does badly and rect math does exactly: interactive
@@ -804,7 +818,7 @@ static func audit(vp: Viewport, tree_root: Node, scene_root: Node, scope: Node, 
 		if r.size.x < 1.0 or r.size.y < 1.0:
 			issues.append({"type": "zero_size", "path": p, "rect": _r4(r),
 				"detail": "visible interactive control with a degenerate rect"})
-		elif bool(here[ci]) and not vr.intersects(r):
+		elif bool(here[ci]) and not vr.intersects(r) and not _scrolled_out(c, routes, scene_root, vr):
 			issues.append({"type": "offscreen", "path": p, "rect": _r4(r),
 				"detail": "visible interactive control entirely outside the viewport"})
 		if touch_min > 0.0 and (r.size.x < touch_min or r.size.y < touch_min):
